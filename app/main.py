@@ -344,7 +344,17 @@ def applications_page(cluster_id: str, request: Request, _: User = Depends(curre
     cluster = db.get(Cluster, cluster_id)
     if not cluster:
         raise HTTPException(404)
-    bundles = db.scalars(select(ApplicationBundle).where(ApplicationBundle.cluster_id == cluster_id).order_by(ApplicationBundle.name)).all()
+    delete_jobs = db.scalars(select(Job).where(
+        Job.cluster_id == cluster_id,
+        Job.kind == JobKind.MANIFEST_DELETE,
+        Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+    )).all()
+    deleting_bundle_ids = {str(job.payload.get("bundle_id")) for job in delete_jobs if job.payload.get("bundle_id")}
+    bundles = [
+        bundle
+        for bundle in db.scalars(select(ApplicationBundle).where(ApplicationBundle.cluster_id == cluster_id).order_by(ApplicationBundle.name)).all()
+        if bundle.id not in deleting_bundle_ids
+    ]
     return templates.TemplateResponse(request, "applications.html", {"cluster": cluster, "bundles": bundles})
 
 
@@ -395,22 +405,24 @@ def delete_application(
         db.add(AuditEvent(action="delete_application_record", object_type="application", object_id=bundle.id, details={"cluster_id": cluster_id, "name": bundle.name}))
         db.delete(bundle)
         db.commit()
-        return RedirectResponse(f"/clusters/{cluster_id}/applications", status_code=303)
+        return RedirectResponse(f"/clusters/{cluster_id}/applications?deleted=1", status_code=303)
     revision = create_revision(db, bundle, "Snapshot für Anwendungslöschung")
     db.flush()
     try:
         queue_job(db, cluster, JobKind.MANIFEST_DELETE, {"bundle_id": bundle.id, "revision_id": revision.id})
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return RedirectResponse(f"/clusters/{cluster_id}/applications", status_code=303)
+    return RedirectResponse(f"/clusters/{cluster_id}/applications?delete_queued=1", status_code=303)
 
 
 @app.get("/clusters/{cluster_id}/applications/{bundle_id}", response_class=HTMLResponse)
 def application_editor(cluster_id: str, bundle_id: str, request: Request, _: User = Depends(current_user), db: Session = Depends(get_db)):
     cluster = db.get(Cluster, cluster_id)
     bundle = db.get(ApplicationBundle, bundle_id)
-    if not cluster or not bundle or bundle.cluster_id != cluster_id:
+    if not cluster:
         raise HTTPException(404)
+    if not bundle or bundle.cluster_id != cluster_id:
+        return RedirectResponse(f"/clusters/{cluster_id}/applications?missing=1", status_code=303)
     files = db.scalars(select(ManifestFile).where(ManifestFile.bundle_id == bundle.id).order_by(ManifestFile.path)).all()
     selected_id = request.query_params.get("file")
     selected = next((item for item in files if item.id == selected_id), files[0] if files else None)

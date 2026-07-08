@@ -2,6 +2,9 @@
 {% block title %}Anwendungen · {{ cluster.name }}{% endblock %}
 {% block content %}
 <div class="page-head"><div><h1>Anwendungen</h1><p class="muted">Deklarative Kubernetes-Manifeste für {{ cluster.name }}</p></div><a class="button secondary" href="/clusters/{{ cluster.id }}">Zur Clusterübersicht</a></div>
+{% if request.query_params.get('delete_queued') %}<div class="notice">Anwendungslöschung wurde gestartet. Der Eintrag wird ausgeblendet, während der Worker die Ressourcen aus Kubernetes entfernt.</div>{% endif %}
+{% if request.query_params.get('deleted') %}<div class="success">Anwendung wurde aus dem Builder entfernt.</div>{% endif %}
+{% if request.query_params.get('missing') %}<div class="notice">Diese Anwendung existiert nicht mehr oder wurde bereits gelöscht.</div>{% endif %}
 <div class="grid application-grid">
   {% for bundle in bundles %}
   <a class="card application-card" href="/clusters/{{ cluster.id }}/applications/{{ bundle.id }}">
