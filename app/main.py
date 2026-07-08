@@ -18,7 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from .config import get_settings
 from .allocations import get_preferences, suggest_allocations, used_allocations, validate_preference_config
 from .db import Base, SessionLocal, engine, get_db
-from .manifests import create_revision, ensure_default_bundle, validate_manifest_content, validate_manifest_path
+from .manifests import create_revision, default_nginx_files, validate_manifest_content, validate_manifest_path
 from .models import AuditEvent, ApplicationBundle, Cluster, Credential, CredentialKind, Job, JobKind, JobStatus, ManifestFile, ManifestRevision, User, utcnow
 from .kubectl_terminal import audit_safe_command, parse_kubectl_command
 from .proxmox import ProxmoxClient, ProxmoxError, split_token
@@ -344,14 +344,13 @@ def applications_page(cluster_id: str, request: Request, _: User = Depends(curre
     cluster = db.get(Cluster, cluster_id)
     if not cluster:
         raise HTTPException(404)
-    ensure_default_bundle(db, cluster)
     bundles = db.scalars(select(ApplicationBundle).where(ApplicationBundle.cluster_id == cluster_id).order_by(ApplicationBundle.name)).all()
     return templates.TemplateResponse(request, "applications.html", {"cluster": cluster, "bundles": bundles})
 
 
 @app.post("/clusters/{cluster_id}/applications")
 def create_application(
-    cluster_id: str, name: str = Form(), description: str = Form(""),
+    cluster_id: str, name: str = Form(), description: str = Form(""), template: str = Form("blank"),
     _: User = Depends(current_user), db: Session = Depends(get_db),
 ):
     cluster = db.get(Cluster, cluster_id)
@@ -365,13 +364,45 @@ def create_application(
     bundle = ApplicationBundle(cluster_id=cluster_id, name=normalized, description=description.strip()[:255])
     db.add(bundle)
     db.flush()
-    namespace = f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {normalized}\n"
-    bundle.files.append(ManifestFile(path="namespace.yaml", content=namespace))
+    if template == "nginx_demo":
+        for path, content in default_nginx_files(cluster, normalized).items():
+            bundle.files.append(ManifestFile(path=path, content=content))
+    elif template == "blank":
+        namespace = f"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {normalized}\n"
+        bundle.files.append(ManifestFile(path="namespace.yaml", content=namespace))
+    else:
+        raise HTTPException(400, "Unbekannte Anwendungsvorlage")
     db.flush()
     create_revision(db, bundle, "Anwendung erstellt")
     db.add(AuditEvent(action="create_application", object_type="application", object_id=bundle.id, details={"cluster_id": cluster_id, "name": normalized}))
     db.commit()
     return RedirectResponse(f"/clusters/{cluster_id}/applications/{bundle.id}", status_code=303)
+
+
+@app.post("/clusters/{cluster_id}/applications/{bundle_id}/delete")
+def delete_application(
+    cluster_id: str, bundle_id: str, delete_confirmation: str = Form(""),
+    _: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    cluster = db.get(Cluster, cluster_id)
+    bundle = db.get(ApplicationBundle, bundle_id)
+    if not cluster or not bundle or bundle.cluster_id != cluster_id:
+        raise HTTPException(404)
+    if delete_confirmation != bundle.name:
+        raise HTTPException(400, "Zur Bestätigung muss der Anwendungsname eingegeben werden")
+    kubeconfig_available = (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file()
+    if not kubeconfig_available:
+        db.add(AuditEvent(action="delete_application_record", object_type="application", object_id=bundle.id, details={"cluster_id": cluster_id, "name": bundle.name}))
+        db.delete(bundle)
+        db.commit()
+        return RedirectResponse(f"/clusters/{cluster_id}/applications", status_code=303)
+    revision = create_revision(db, bundle, "Snapshot für Anwendungslöschung")
+    db.flush()
+    try:
+        queue_job(db, cluster, JobKind.MANIFEST_DELETE, {"bundle_id": bundle.id, "revision_id": revision.id})
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return RedirectResponse(f"/clusters/{cluster_id}/applications", status_code=303)
 
 
 @app.get("/clusters/{cluster_id}/applications/{bundle_id}", response_class=HTMLResponse)

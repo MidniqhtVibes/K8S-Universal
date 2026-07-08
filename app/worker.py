@@ -14,7 +14,7 @@ from .config import get_settings
 from .db import SessionLocal
 from .generator import render_cluster
 from .manifests import render_snapshot
-from .models import ApplicationBundle, Cluster, ClusterStatus, Job, JobKind, JobStatus, ManifestRevision
+from .models import AuditEvent, ApplicationBundle, Cluster, ClusterStatus, Job, JobKind, JobStatus, ManifestRevision
 from .schemas import ClusterConfig
 from .security import redact
 from .services import credential_payload
@@ -135,7 +135,7 @@ def execute(job_id: str) -> None:
             raise RuntimeError("Job-Konfiguration ist veraltet")
         config = ClusterConfig.model_validate(cluster.config)
         workspace = settings.data_root / "clusters" / config.id
-        if job.kind in (JobKind.MANIFEST_VALIDATE, JobKind.MANIFEST_DIFF, JobKind.MANIFEST_APPLY):
+        if job.kind in (JobKind.MANIFEST_VALIDATE, JobKind.MANIFEST_DIFF, JobKind.MANIFEST_APPLY, JobKind.MANIFEST_DELETE):
             execute_manifest_job(job, cluster, workspace)
             return
         # Refresh generated inputs and IaC sources so existing clusters also pick
@@ -236,6 +236,19 @@ def execute_manifest_job(job: Job, cluster: Cluster, workspace: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="cluster-manifests-") as temporary:
         manifest = Path(temporary) / "bundle.yaml"
         manifest.write_text(rendered, encoding="utf-8")
+        if job.kind == JobKind.MANIFEST_DELETE:
+            delete_manifest = Path(temporary) / "delete-bundle.yaml"
+            delete_manifest.write_text(yaml.safe_dump_all(reversed(documents), sort_keys=False), encoding="utf-8")
+            base = ["kubectl", "--kubeconfig", str(kubeconfig)]
+            run_command(job, [*base, "delete", "--ignore-not-found=true", "-f", str(delete_manifest)], workspace, env, [])
+            with SessionLocal() as db:
+                bundle = db.get(ApplicationBundle, str(job.payload.get("bundle_id", "")))
+                if bundle and bundle.cluster_id == cluster.id:
+                    db.add(AuditEvent(action="delete_application", object_type="application", object_id=bundle.id, details={"cluster_id": cluster.id, "name": bundle.name}))
+                    db.delete(bundle)
+                    db.commit()
+            append_log(job.id, "Anwendungs-Bundle erfolgreich aus Kubernetes und Builder entfernt.\n")
+            return
         declared_namespaces = {
             str(document.get("metadata", {}).get("name"))
             for document in documents
@@ -318,7 +331,7 @@ def finish_job(job_id: str, error: Exception | None = None) -> None:
         elif error:
             job.status = JobStatus.FAILED
             job.error = redact(str(error))
-            if job.kind not in (JobKind.MANIFEST_VALIDATE, JobKind.MANIFEST_DIFF, JobKind.MANIFEST_APPLY):
+            if job.kind not in (JobKind.MANIFEST_VALIDATE, JobKind.MANIFEST_DIFF, JobKind.MANIFEST_APPLY, JobKind.MANIFEST_DELETE):
                 cluster = db.get(Cluster, job.cluster_id)
                 if cluster:
                     cluster.status = ClusterStatus.FAILED

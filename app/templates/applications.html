@@ -11,6 +11,13 @@
   </a>
   {% endfor %}
 </div>
-<section class="card new-application"><h2>Neue Anwendung</h2><form method="post" action="/clusters/{{ cluster.id }}/applications" class="form-grid"><label>Name<input name="name" required pattern="[a-z0-9-]+" placeholder="meine-anwendung"></label><label class="wide">Beschreibung<input name="description" placeholder="Zweck der Anwendung"></label><div class="form-submit"><button>Anwendung anlegen</button></div></form></section>
+<section class="card new-application">
+  <h2>Neue Anwendung</h2>
+  <form method="post" action="/clusters/{{ cluster.id }}/applications" class="form-grid">
+    <label>Name<input name="name" required pattern="[a-z0-9-]+" placeholder="meine-anwendung"></label>
+    <label>Vorlage<select name="template"><option value="blank">Leer: nur Namespace</option><option value="nginx_demo">Nginx-Demo mit Service und Ingress</option></select></label>
+    <label class="wide">Beschreibung<input name="description" placeholder="Zweck der Anwendung"></label>
+    <div class="form-submit"><button>Anwendung anlegen</button></div>
+  </form>
+</section>
 {% endblock %}
-

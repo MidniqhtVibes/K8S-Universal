@@ -58,6 +58,8 @@ h2 { margin-top: 0; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; margin-bottom: 20px; box-shadow: 0 12px 30px rgb(0 0 0 / 12%); }
 .cluster-card { text-decoration: none; color: inherit; transition: .15s; }
 .cluster-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+.cluster-vip { color: #b9c9da; font-size: .88rem; margin: 10px 0; }
+.cluster-vip code { background: #07101a; border: 1px solid #26364b; border-radius: 6px; padding: 2px 6px; color: #d9fff3; }
 .narrow { max-width: 440px; margin: 8vh auto; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
