@@ -47,3 +47,14 @@ def test_kubeadm_bootstrap_uses_local_api_until_vip_is_ready():
     assert "Wait for Kubernetes API through VIP" in init_playbook
     assert "/etc/kubernetes/admin.conf" not in cni_playbook
     assert "/root/admin-local.conf" in cni_playbook
+
+
+def test_loadbalancer_waits_for_vip_before_control_plane_bootstrap():
+    project = Path(__file__).parents[1]
+    loadbalancer_playbook = (project / "ansible/playbooks/02-loadbalancer.yml").read_text(encoding="utf-8")
+    init_playbook = (project / "ansible/playbooks/05-init-control-plane.yml").read_text(encoding="utf-8")
+    assert "update_cache_retries: 5" in loadbalancer_playbook
+    assert "Apply pending load balancer service restarts" in loadbalancer_playbook
+    assert "Wait for Keepalived master to own the API VIP" in loadbalancer_playbook
+    assert "groups['loadbalancer'] | map('extract', hostvars, 'keepalived_vip_check')" in loadbalancer_playbook
+    assert "Wait for Kubernetes API TCP port through VIP" in init_playbook

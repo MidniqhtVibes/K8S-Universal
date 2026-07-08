@@ -101,6 +101,13 @@
       ansible.builtin.set_fact:
         join_command: "{{ join_command_raw.stdout | regex_replace('^(kubeadm join )[^ ]+', '\\1' ~ control_plane_endpoint) }}"
 
+    - name: Wait for Kubernetes API TCP port through VIP
+      ansible.builtin.wait_for:
+        host: "{{ api_vip }}"
+        port: "{{ api_port }}"
+        state: started
+        timeout: 180
+
     - name: Wait for Kubernetes API through VIP
       ansible.builtin.command:
         argv:
