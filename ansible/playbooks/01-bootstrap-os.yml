@@ -4,11 +4,17 @@
   become: true
   any_errors_fatal: true
   tasks:
-    - name: Wait for cloud-init to finish
-      ansible.builtin.command: timeout 1200 cloud-init status --wait --long
+    - name: Poll cloud-init status until cleanly finished
+      ansible.builtin.command: cloud-init status --long
       register: cloud_init_status
       changed_when: false
       failed_when: false
+      until: >-
+        cloud_init_status.rc in [0, 2]
+        and 'status: done' in cloud_init_status.stdout
+        and 'errors: []' in cloud_init_status.stdout
+      retries: 80
+      delay: 15
 
     - name: Collect cloud-init output log on failure
       ansible.builtin.command:

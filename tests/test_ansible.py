@@ -25,8 +25,10 @@ def test_calico_crds_use_server_side_apply():
 def test_package_install_waits_for_cloud_init_and_apt_locks():
     project = Path(__file__).parents[1]
     bootstrap = (project / "ansible/playbooks/01-bootstrap-os.yml").read_text(encoding="utf-8")
-    assert "cloud-init status --wait" in bootstrap
-    assert "timeout 1200 cloud-init status --wait --long" in bootstrap
+    assert "cloud-init status --long" in bootstrap
+    assert "Poll cloud-init status until cleanly finished" in bootstrap
+    assert "retries: 80" in bootstrap
+    assert "delay: 15" in bootstrap
     assert "async:" not in bootstrap
     assert "poll:" not in bootstrap
     assert "failed_when: false" in bootstrap
