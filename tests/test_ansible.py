@@ -40,7 +40,7 @@ def test_kubeadm_bootstrap_uses_local_api_until_vip_is_ready():
     init_playbook = (project / "ansible/playbooks/05-init-control-plane.yml").read_text(encoding="utf-8")
     cni_playbook = (project / "ansible/playbooks/08-install-cni.yml").read_text(encoding="utf-8")
     assert "/root/admin-local.conf" in init_playbook
-    assert "server: https://127.0.0.1:{{ api_port }}" in init_playbook
+    assert "server: https://{{ ansible_host }}:{{ api_port }}" in init_playbook
     assert "kubeadm\n          - token\n          - create\n          - --kubeconfig\n          - /root/admin-local.conf" in init_playbook
     assert "Normalize join command endpoint to VIP" in init_playbook
     assert "regex_replace('^(kubeadm join )[^ ]+'" in init_playbook
