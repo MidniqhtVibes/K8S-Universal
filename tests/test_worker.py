@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.worker import ingress_test_commands
+
 
 def test_destroy_plan_avoids_terraform_refresh_and_proxmox_preflight():
     worker = (Path(__file__).parents[1] / "app/worker.py").read_text(encoding="utf-8")
@@ -22,3 +24,24 @@ def test_apply_recreates_current_tfplan_before_applying():
     assert "def create_terraform_plan(" in worker
     assert "Terraform-Plan wird fuer den aktuellen Apply neu erzeugt" in worker
     assert "create_terraform_plan(job, terraform_dir, env, secrets)\n            with SessionLocal() as db:" in worker
+
+
+def test_ingress_test_commands_use_vip_and_host_header():
+    commands = ingress_test_commands(
+        [
+            {
+                "kind": "Ingress",
+                "spec": {
+                    "rules": [
+                        {"host": "web.lab.local", "http": {"paths": [{"path": "/"}, {"path": "/api"}]}},
+                        {"host": "web.lab.local", "http": {"paths": [{"path": "/"}]}},
+                    ]
+                },
+            }
+        ],
+        "10.200.50.150",
+    )
+    assert commands == [
+        'curl -v -H "Host: web.lab.local" http://10.200.50.150/',
+        'curl -v -H "Host: web.lab.local" http://10.200.50.150/api',
+    ]

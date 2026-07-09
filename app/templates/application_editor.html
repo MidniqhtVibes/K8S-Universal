@@ -60,18 +60,6 @@
     </div>
 
     <hr>
-    <h3>Revisionen</h3>
-    <div class="revision-list">
-      {% for revision in revisions %}
-      <div class="revision">
-        <div><strong>v{{ revision.version }}</strong>{% if revision.applied_at %}<span class="badge ready">applied</span>{% endif %}<small>{{ revision.created_at.strftime('%d.%m. %H:%M') }}</small></div>
-        <p>{{ revision.message }}</p>
-        <form method="post" action="/clusters/{{ cluster.id }}/applications/{{ bundle.id }}/revisions/{{ revision.id }}/restore" onsubmit="return confirm('Revision {{ revision.version }} als neuen Entwurf wiederherstellen?')"><button class="link-button">Wiederherstellen</button></form>
-      </div>
-      {% endfor %}
-    </div>
-
-    <hr>
     <h3>Anwendungseintrag</h3>
     <form method="post" action="/clusters/{{ cluster.id }}/applications/{{ bundle.id }}/delete" class="stack" onsubmit="return confirm('Anwendungseintrag {{ bundle.name }} wirklich entfernen? Kubernetes-Ressourcen werden dadurch nicht geloescht.')">
       <input name="delete_confirmation" placeholder="{{ bundle.name }}" required>
@@ -79,6 +67,21 @@
     </form>
   </aside>
 </div>
+
+<section class="card revision-panel">
+  <h2>Revisionen</h2>
+  <div class="revision-list vertical">
+    {% for revision in revisions %}
+    <div class="revision">
+      <div><strong>v{{ revision.version }}</strong>{% if revision.applied_at %}<span class="badge ready">applied</span>{% endif %}<small>{{ revision.created_at.strftime('%d.%m. %H:%M') }}</small></div>
+      <p>{{ revision.message }}</p>
+      <form method="post" action="/clusters/{{ cluster.id }}/applications/{{ bundle.id }}/revisions/{{ revision.id }}/restore" onsubmit="return confirm('Revision {{ revision.version }} als neuen Entwurf wiederherstellen?')"><button class="link-button">Wiederherstellen</button></form>
+    </div>
+    {% else %}
+    <p class="muted">Noch keine Revisionen vorhanden.</p>
+    {% endfor %}
+  </div>
+</section>
 
 <section class="card">
   <h2>Manifest-Jobs</h2>

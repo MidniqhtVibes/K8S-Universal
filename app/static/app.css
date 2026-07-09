@@ -105,7 +105,9 @@ kbd { border: 1px solid #43556b; background: #182536; border-radius: 4px; paddin
 .delete-file-form { padding: 10px 14px; border-top: 1px solid var(--line); text-align: right; }
 .manifest-inspector { padding: 16px; }
 .full { width: 100%; }
+.revision-panel { margin-top: 4px; }
 .revision-list { display: flex; flex-direction: column; gap: 9px; }
+.revision-list.vertical { max-height: 360px; overflow: auto; padding-right: 4px; }
 .revision { border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: #0c1725; }
 .revision > div { display: flex; align-items: center; gap: 7px; }
 .revision p { margin: 6px 0; color: #8fa1b5; font-size: .78rem; word-break: break-word; }

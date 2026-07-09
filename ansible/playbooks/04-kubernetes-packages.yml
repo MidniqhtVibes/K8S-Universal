@@ -11,11 +11,38 @@
         mode: "0755"
 
     - name: Download Kubernetes apt key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor }}/deb/Release.key"
+        dest: /tmp/kubernetes-release.key
+        mode: "0644"
+        force: true
+        timeout: 30
+      register: kubernetes_apt_key_download
+      until: kubernetes_apt_key_download is succeeded
+      retries: 5
+      delay: 10
+
+    - name: Build Kubernetes apt keyring atomically
       ansible.builtin.shell: |
-        curl -fsSL https://pkgs.k8s.io/core:/stable:/{{ kubernetes_minor }}/deb/Release.key \
-        | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        set -euo pipefail
+        release_key=/tmp/kubernetes-release.key
+        tmp_keyring=/tmp/kubernetes-apt-keyring.gpg
+        final_keyring=/etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        final_tmp="${final_keyring}.tmp"
+
+        rm -f "${tmp_keyring}" "${final_tmp}"
+        gpg --batch --dearmor -o "${tmp_keyring}" "${release_key}"
+        gpg --batch --quiet --show-keys "${tmp_keyring}" >/dev/null
+
+        if ! cmp -s "${tmp_keyring}" "${final_keyring}"; then
+          install -m 0644 "${tmp_keyring}" "${final_tmp}"
+          mv "${final_tmp}" "${final_keyring}"
+          echo changed
+        fi
       args:
-        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        executable: /bin/bash
+      register: kubernetes_apt_keyring
+      changed_when: "'changed' in kubernetes_apt_keyring.stdout"
 
     - name: Add Kubernetes apt repository
       ansible.builtin.copy:
@@ -27,6 +54,8 @@
       ansible.builtin.apt:
         update_cache: true
         lock_timeout: 600
+        update_cache_retries: 5
+        update_cache_retry_max_delay: 12
 
     - name: Install kubelet kubeadm kubectl
       ansible.builtin.apt:

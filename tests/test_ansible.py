@@ -38,3 +38,15 @@ def test_package_install_waits_for_cloud_init_and_apt_locks():
     assert "'errors: []' not in cloud_init_status.stdout" in bootstrap
     assert "lock_timeout: 600" in bootstrap
     assert "dpkg --configure -a" in bootstrap
+
+
+def test_kubernetes_apt_keyring_is_rebuilt_safely():
+    project = Path(__file__).parents[1]
+    packages = (project / "ansible/playbooks/04-kubernetes-packages.yml").read_text(encoding="utf-8")
+    assert "ansible.builtin.get_url" in packages
+    assert "until: kubernetes_apt_key_download is succeeded" in packages
+    assert "gpg --batch --dearmor" in packages
+    assert "gpg --batch --quiet --show-keys" in packages
+    assert "mv \"${final_tmp}\" \"${final_keyring}\"" in packages
+    assert "creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg" not in packages
+    assert "update_cache_retries: 5" in packages

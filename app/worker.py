@@ -149,6 +149,37 @@ def validate_proxmox(job: Job, config: ClusterConfig, api_token: str, workspace:
     append_log(job.id, "Proxmox-Prüfung erfolgreich.\n")
 
 
+def ingress_test_commands(documents: list[dict], api_vip: str) -> list[str]:
+    commands: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for document in documents:
+        if document.get("kind") != "Ingress":
+            continue
+        spec = document.get("spec", {})
+        if not isinstance(spec, dict):
+            continue
+        for rule in spec.get("rules", []) or []:
+            if not isinstance(rule, dict) or not rule.get("host"):
+                continue
+            host = str(rule["host"])
+            http = rule.get("http", {})
+            paths = http.get("paths", []) if isinstance(http, dict) else []
+            if not paths:
+                paths = [{"path": "/"}]
+            for path_item in paths:
+                path = "/"
+                if isinstance(path_item, dict) and path_item.get("path"):
+                    path = str(path_item["path"])
+                if not path.startswith("/"):
+                    path = "/" + path
+                key = (host, path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                commands.append(f'curl -v -H "Host: {host}" http://{api_vip}{path}')
+    return commands
+
+
 def execute(job_id: str) -> None:
     with SessionLocal() as db:
         job = db.get(Job, job_id)
