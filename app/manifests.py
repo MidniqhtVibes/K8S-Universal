@@ -328,9 +328,6 @@ def render_application_template(template_id: str, name: str) -> dict[str, str]:
     raise ValueError("Unbekanntes Anwendungstemplate")
 
 
-DEFAULT_NGINX_FILES = render_application_template("nginx-demo", "demo")
-
-
 def validate_manifest_path(path: str) -> str:
     value = path.strip().lower()
     pure = PurePosixPath(value)

@@ -1,5 +1,6 @@
 terraform/terraform.tfvars
 kubeconfig
+kubectl
 .env
 .venv/
 __pycache__/

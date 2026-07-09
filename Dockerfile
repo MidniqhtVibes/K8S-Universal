@@ -26,7 +26,6 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY app app
 COPY tests tests
 COPY ansible ansible
-RUN curl -fsSLo app/static/htmx.min.js https://unpkg.com/htmx.org@2.0.6/dist/htmx.min.js
 RUN mkdir -p app/static/vendor \
     && curl -fsSLo app/static/vendor/xterm.js https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js \
     && curl -fsSLo app/static/vendor/xterm.css https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css \

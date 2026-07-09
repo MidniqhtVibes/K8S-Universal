@@ -1,6 +1,5 @@
 import ipaddress
 import json
-import re
 import uuid
 from pathlib import Path
 
@@ -156,7 +155,3 @@ def queue_job(db: Session, cluster: Cluster, kind: JobKind, payload: dict | None
     db.add(AuditEvent(action=f"queue_{kind.value}", object_type="cluster", object_id=cluster.id))
     db.commit()
     return job
-
-
-def safe_slug(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]", "-", value)

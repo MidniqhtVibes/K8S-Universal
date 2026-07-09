@@ -1,11 +1,12 @@
 import pytest
 
-from app.manifests import APPLICATION_TEMPLATES, DEFAULT_NGINX_FILES, render_application_template, render_snapshot, validate_manifest_content, validate_manifest_path
+from app.manifests import APPLICATION_TEMPLATES, render_application_template, render_snapshot, validate_manifest_content, validate_manifest_path
 
 
 def test_default_nginx_bundle_contains_expected_structure():
-    assert set(DEFAULT_NGINX_FILES) == {"namespace.yaml", "deployment.yaml", "service.yaml", "ingress.yaml"}
-    rendered, documents = render_snapshot(DEFAULT_NGINX_FILES)
+    files = render_application_template("nginx-demo", "demo")
+    assert set(files) == {"namespace.yaml", "deployment.yaml", "service.yaml", "ingress.yaml"}
+    rendered, documents = render_snapshot(files)
     assert documents[0]["kind"] == "Namespace"
     assert {item["kind"] for item in documents} == {"Namespace", "Deployment", "Service", "Ingress"}
     assert "demo.lab.local" in rendered

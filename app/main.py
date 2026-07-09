@@ -269,7 +269,7 @@ def allocation_suggestion(
 ):
     try:
         if lb_count < 2 or cp_count not in (3, 5, 7) or worker_count < 1:
-            raise ValueError("UngÃ¼ltige Knotenzahl")
+            raise ValueError("Ungültige Knotenzahl")
         external_ids: set[int] = set()
         if credential_id:
             credential = db.get(Credential, credential_id)

@@ -59,7 +59,7 @@ def parse_reserved_ips(value: str) -> set[ipaddress.IPv4Address]:
             if not isinstance(network, ipaddress.IPv4Network):
                 raise ValueError("Nur IPv4-Reservierungen werden unterstützt")
             if network.num_addresses > 4096:
-                raise ValueError(f"Reservierter Bereich {network} ist zu groÃŸ (maximal 4096 Adressen)")
+                raise ValueError(f"Reservierter Bereich {network} ist zu groß (maximal 4096 Adressen)")
             result.update(network.hosts())
         else:
             result.add(ipaddress.IPv4Address(token))
@@ -140,7 +140,7 @@ def validate_preference_config(config: dict[str, Any]) -> dict[str, Any]:
     pod_network = ipaddress.ip_network(str(merged["pod_cidr"]), strict=True)
     service_network = ipaddress.ip_network(str(merged["service_cidr"]), strict=True)
     if network.overlaps(pod_network) or network.overlaps(service_network) or pod_network.overlaps(service_network):
-        raise ValueError("VM-, Pod- und Service-Netze dÃ¼rfen sich nicht Ã¼berschneiden")
+        raise ValueError("VM-, Pod- und Service-Netze dürfen sich nicht überschneiden")
     parse_reserved_ips(str(merged.get("reserved_ips", "")))
     for role in ("vip_pool", "lb_ip", "cp_ip", "worker_ip"):
         start = ipaddress.IPv4Address(str(merged[f"{role}_start"]))
@@ -157,11 +157,11 @@ def validate_preference_config(config: dict[str, Any]) -> dict[str, Any]:
     for role in ("lb", "cp", "worker"):
         count = int(merged[f"{role}_count"])
         if count < (2 if role == "lb" else 1):
-            raise ValueError(f"UngÃ¼ltige Standardanzahl: {role}")
+            raise ValueError(f"Ungültige Standardanzahl: {role}")
         ip_capacity = int(ipaddress.IPv4Address(merged[f"{role}_ip_end"])) - int(ipaddress.IPv4Address(merged[f"{role}_ip_start"])) + 1
         id_capacity = int(merged[f"{role}_vm_id_end"]) - int(merged[f"{role}_vm_id_start"]) + 1
         if count > ip_capacity or count > id_capacity:
-            raise ValueError(f"Der Pool fÃ¼r {role} ist kleiner als die Standardanzahl")
+            raise ValueError(f"Der Pool für {role} ist kleiner als die Standardanzahl")
     return merged
 
 

@@ -46,11 +46,11 @@ Nach einem erfolgreichen Destroy erhält der Cluster den Status `destroyed`. Ers
 ### Automatische IP- und VM-ID-Vergabe
 
 Unter **Einstellungen** lassen sich das Standardnetz sowie getrennte IP- und
-VM-ID-Pools fÃ¼r Load Balancer, Control Planes und Worker festlegen. Neue Cluster
-erhalten daraus automatisch den ersten zusammenhÃ¤ngenden freien Bereich. Aktive
-Cluster, manuell reservierte IPs/CIDRs und bei ausgewÃ¤hltem Proxmox-Credential
-bereits vorhandene VM-IDs werden Ã¼bersprungen. Doppelte Vergaben zwischen vom
-Builder verwalteten Clustern werden zusÃ¤tzlich beim Speichern abgewiesen.
+VM-ID-Pools für Load Balancer, Control Planes und Worker festlegen. Neue Cluster
+erhalten daraus automatisch den ersten zusammenhängenden freien Bereich. Aktive
+Cluster, manuell reservierte IPs/CIDRs und bei ausgewähltem Proxmox-Credential
+bereits vorhandene VM-IDs werden übersprungen. Doppelte Vergaben zwischen vom
+Builder verwalteten Clustern werden zusätzlich beim Speichern abgewiesen.
 
 Der Schalter **Clustername im Proxmox-VM-Namen** erzeugt Namen wie
 `produktion-control-01`. Bestehende Cluster behalten ohne aktivierten Schalter
