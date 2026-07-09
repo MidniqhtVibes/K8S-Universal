@@ -7,9 +7,36 @@ const fitAddon = new FitAddon.FitAddon();
 terminal.loadAddon(fitAddon); terminal.open(container); fitAddon.fit();
 setTimeout(() => fitAddon.fit(), 100);
 window.addEventListener('resize', () => fitAddon.fit());
-let buffer = ''; let busy = true; const history = []; let historyIndex = 0;
+let buffer = ''; let cursor = 0; let busy = true; const history = []; let historyIndex = 0;
 const readOnlyVerbs = new Set(['api-resources','api-versions','auth','cluster-info','describe','diff','explain','get','logs','options','top','version','wait']);
-const prompt = () => { busy = false; buffer = ''; terminal.write('\r\n\x1b[32mkubectl>\x1b[0m '); terminal.scrollToBottom(); };
+const moveTerminalCursor = (direction, count) => { if (count > 0) terminal.write(`\x1b[${count}${direction}`); };
+const clearInput = () => {
+  moveTerminalCursor('C', buffer.length - cursor);
+  while (buffer.length) { terminal.write('\b \b'); buffer = buffer.slice(0, -1); }
+  cursor = 0;
+};
+const replaceInput = value => {
+  clearInput();
+  buffer = value;
+  cursor = value.length;
+  terminal.write(value);
+};
+const insertInput = text => {
+  const tail = buffer.slice(cursor);
+  buffer = buffer.slice(0, cursor) + text + tail;
+  terminal.write(text + tail);
+  moveTerminalCursor('D', tail.length);
+  cursor += text.length;
+};
+const backspaceInput = () => {
+  if (!cursor) return;
+  const tail = buffer.slice(cursor);
+  buffer = buffer.slice(0, cursor - 1) + tail;
+  terminal.write('\b' + tail + ' ');
+  moveTerminalCursor('D', tail.length + 1);
+  cursor -= 1;
+};
+const prompt = () => { busy = false; buffer = ''; cursor = 0; terminal.write('\r\n\x1b[32mkubectl>\x1b[0m '); terminal.scrollToBottom(); };
 const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
 const socket = new WebSocket(`${scheme}://${location.host}/ws/clusters/${clusterId}/kubectl`);
 socket.onopen = () => { statusDot.classList.add('connected'); };
@@ -25,7 +52,10 @@ terminal.onData(data => {
   if (data === '\u0003') { if (busy && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type: 'interrupt'})); else terminal.write('^C'); return; }
   if (busy) return;
   if (data === '\r') {
-    const command = buffer.trim(); terminal.write('\r\n');
+    const command = buffer.trim();
+    moveTerminalCursor('C', buffer.length - cursor);
+    cursor = buffer.length;
+    terminal.write('\r\n');
     if (!command) { prompt(); return; }
     const verb = command.replace(/^kubectl\s+/, '').trim().split(/\s+/)[0].toLowerCase();
     const mutating = !readOnlyVerbs.has(verb);
@@ -36,8 +66,15 @@ terminal.onData(data => {
     if (socket.readyState !== WebSocket.OPEN) { terminal.write('\x1b[31mTerminalverbindung ist nicht verfügbar.\x1b[0m'); prompt(); return; }
     socket.send(JSON.stringify({type: 'command', command, confirm_mutation: confirmMutation})); return;
   }
-  if (data === '\u007f') { if (buffer.length) { buffer = buffer.slice(0, -1); terminal.write('\b \b'); } return; }
-  if (data === '\u001b[A' && history.length) { while (buffer.length) { terminal.write('\b \b'); buffer = buffer.slice(0, -1); } historyIndex = Math.max(0, historyIndex - 1); buffer = history[historyIndex]; terminal.write(buffer); return; }
-  if (data.length > 1 && !data.includes('\r') && !data.includes('\n') && !data.startsWith('\u001b')) { buffer += data; terminal.write(data); return; }
-  if (data.length === 1 && data >= ' ') { buffer += data; terminal.write(data); }
+  if (data === '\u001b[D') { if (cursor > 0) { moveTerminalCursor('D', 1); cursor -= 1; } return; }
+  if (data === '\u001b[C') { if (cursor < buffer.length) { moveTerminalCursor('C', 1); cursor += 1; } return; }
+  if (data === '\u001b[A' && history.length) { historyIndex = Math.max(0, historyIndex - 1); replaceInput(history[historyIndex]); return; }
+  if (data === '\u001b[B' && history.length) {
+    if (historyIndex < history.length - 1) { historyIndex += 1; replaceInput(history[historyIndex]); }
+    else { historyIndex = history.length; replaceInput(''); }
+    return;
+  }
+  if (data === '\u007f') { backspaceInput(); return; }
+  if (data.length > 1 && !data.includes('\r') && !data.includes('\n') && !data.startsWith('\u001b')) { insertInput(data); return; }
+  if (data.length === 1 && data >= ' ') { insertInput(data); }
 });

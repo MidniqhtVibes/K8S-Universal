@@ -153,6 +153,8 @@ def ingress_test_commands(documents: list[dict], api_vip: str) -> list[str]:
     commands: list[str] = []
     seen: set[tuple[str, str]] = set()
     for document in documents:
+        if not isinstance(document, dict):
+            continue
         if document.get("kind") != "Ingress":
             continue
         spec = document.get("spec", {})
@@ -334,6 +336,14 @@ def execute_manifest_job(job: Job, cluster: Cluster, workspace: Path) -> None:
             revision.applied_at = datetime.now(UTC)
             db.commit()
     append_log(job.id, "Anwendungs-Bundle erfolgreich angewendet.\n")
+    api_vip = str(cluster.config.get("network", {}).get("api_vip", "")).strip()
+    if api_vip:
+        commands = ingress_test_commands(documents, api_vip)
+        if commands:
+            append_log(job.id, "\nFunktionstest ueber die Cluster-VIP:\n")
+            append_log(job.id, "".join(f"$ {command}\n" for command in commands))
+        else:
+            append_log(job.id, "\nKein Ingress-Host im Bundle gefunden; es wurde kein Curl-Test erzeugt.\n")
 
 
 def verify_cluster(job: Job, workspace: Path, env: dict[str, str], secrets: list[str]) -> None:

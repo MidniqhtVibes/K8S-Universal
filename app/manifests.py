@@ -31,9 +31,17 @@ APPLICATION_TEMPLATES = {
         "name": "Leere Anwendung",
         "description": "Nur Namespace anlegen und eigene Manifestdateien ergaenzen",
     },
+    "whoami": {
+        "name": "Whoami",
+        "description": "Header-Echo zum Pruefen von VIP, Host-Header, Service und Ingress",
+    },
     "nginx-demo": {
         "name": "Nginx Demo",
         "description": "Namespace, Deployment, Service und Traefik Ingress",
+    },
+    "rollout-demo": {
+        "name": "Rollout Demo",
+        "description": "Drei Replikas, Probes, ConfigMap-Inhalt und RollingUpdate-Strategie",
     },
 }
 
@@ -119,11 +127,204 @@ spec:
     }
 
 
+def whoami_template(name: str) -> dict[str, str]:
+    return {
+        **namespace_template(name),
+        "deployment.yaml": f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami
+  namespace: {name}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: whoami
+  template:
+    metadata:
+      labels:
+        app: whoami
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:latest
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+""",
+        "service.yaml": f"""apiVersion: v1
+kind: Service
+metadata:
+  name: whoami-service
+  namespace: {name}
+spec:
+  type: ClusterIP
+  selector:
+    app: whoami
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+""",
+        "ingress.yaml": f"""apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: whoami-ingress
+  namespace: {name}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: {name}.lab.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: whoami-service
+                port:
+                  number: 80
+""",
+    }
+
+
+def rollout_demo_template(name: str) -> dict[str, str]:
+    return {
+        **namespace_template(name),
+        "configmap.yaml": f"""apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rollout-demo-content
+  namespace: {name}
+data:
+  index.html: |
+    <!doctype html>
+    <html lang="en">
+    <head><title>rollout-demo</title></head>
+    <body>
+      <h1>rollout-demo v1</h1>
+      <p>Namespace: {name}</p>
+    </body>
+    </html>
+""",
+        "deployment.yaml": f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-demo
+  namespace: {name}
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: rollout-demo
+  template:
+    metadata:
+      labels:
+        app: rollout-demo
+      annotations:
+        rollout-demo/version: v1
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          volumeMounts:
+            - name: content
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+              readOnly: true
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: content
+          configMap:
+            name: rollout-demo-content
+""",
+        "service.yaml": f"""apiVersion: v1
+kind: Service
+metadata:
+  name: rollout-demo-service
+  namespace: {name}
+spec:
+  type: ClusterIP
+  selector:
+    app: rollout-demo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+""",
+        "ingress.yaml": f"""apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rollout-demo-ingress
+  namespace: {name}
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: {name}.lab.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: rollout-demo-service
+                port:
+                  number: 80
+""",
+    }
+
+
 def render_application_template(template_id: str, name: str) -> dict[str, str]:
     if template_id == "blank":
         return namespace_template(name)
+    if template_id == "whoami":
+        return whoami_template(name)
     if template_id == "nginx-demo":
         return {path: content.format(name=name) for path, content in nginx_demo_template(name).items()}
+    if template_id == "rollout-demo":
+        return rollout_demo_template(name)
     raise ValueError("Unbekanntes Anwendungstemplate")
 
 

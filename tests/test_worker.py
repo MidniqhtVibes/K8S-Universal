@@ -45,3 +45,10 @@ def test_ingress_test_commands_use_vip_and_host_header():
         'curl -v -H "Host: web.lab.local" http://10.200.50.150/',
         'curl -v -H "Host: web.lab.local" http://10.200.50.150/api',
     ]
+
+
+def test_manifest_apply_logs_ingress_test_commands():
+    worker = (Path(__file__).parents[1] / "app/worker.py").read_text(encoding="utf-8")
+    assert "Funktionstest ueber die Cluster-VIP:" in worker
+    assert "commands = ingress_test_commands(documents, api_vip)" in worker
+    assert "Kein Ingress-Host im Bundle gefunden" in worker
