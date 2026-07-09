@@ -22,6 +22,17 @@ def test_calico_crds_use_server_side_apply():
     assert " create -f " not in playbook
 
 
+def test_calico_manifests_are_downloaded_before_apply():
+    project = Path(__file__).parents[1]
+    playbook = (project / "ansible/playbooks/08-install-cni.yml").read_text(encoding="utf-8")
+    assert "ansible.builtin.get_url" in playbook
+    assert "until: calico_crds_download is succeeded" in playbook
+    assert "until: tigera_operator_download is succeeded" in playbook
+    assert '"/root/calico-{{ calico_version }}-crds.yaml"' in playbook
+    assert '"/root/calico-{{ calico_version }}-tigera-operator.yaml"' in playbook
+    assert '- "https://raw.githubusercontent.com' not in playbook
+
+
 def test_package_install_waits_for_cloud_init_and_apt_locks():
     project = Path(__file__).parents[1]
     site = (project / "ansible/site.yml").read_text(encoding="utf-8")

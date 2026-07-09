@@ -19,7 +19,7 @@ from .config import get_settings
 from .allocations import get_preferences, suggest_allocations, used_allocations, validate_preference_config
 from .db import Base, SessionLocal, engine, get_db
 from .manifests import APPLICATION_TEMPLATES, create_revision, render_application_template, validate_manifest_content, validate_manifest_path
-from .models import AuditEvent, ApplicationBundle, Cluster, Credential, CredentialKind, Job, JobKind, JobStatus, ManifestFile, ManifestRevision, User, utcnow
+from .models import AuditEvent, ApplicationBundle, Cluster, ClusterStatus, Credential, CredentialKind, Job, JobKind, JobStatus, ManifestFile, ManifestRevision, User, utcnow
 from .kubectl_terminal import audit_safe_command, parse_kubectl_command
 from .proxmox import ProxmoxClient, ProxmoxError, split_token
 from .security import validate_ssh_keypair, verify_password
@@ -109,7 +109,19 @@ def dashboard(request: Request, _: User = Depends(current_user), db: Session = D
 @app.get("/credentials", response_class=HTMLResponse)
 def credentials_page(request: Request, _: User = Depends(current_user), db: Session = Depends(get_db)):
     credentials = db.scalars(select(Credential).order_by(Credential.created_at.desc())).all()
-    return templates.TemplateResponse(request, "credentials.html", {"credentials": credentials})
+    active_clusters = db.scalars(select(Cluster).where(Cluster.status != ClusterStatus.DESTROYED)).all()
+    used_credential_ids = credential_ids_used_by(active_clusters)
+    return templates.TemplateResponse(request, "credentials.html", {"credentials": credentials, "used_credential_ids": used_credential_ids})
+
+
+def credential_ids_used_by(clusters: list[Cluster]) -> set[str]:
+    used: set[str] = set()
+    for cluster in clusters:
+        for section in ("proxmox", "ssh"):
+            reference = cluster.config.get(section, {}).get("credential_ref")
+            if isinstance(reference, str) and reference.startswith("credential://"):
+                used.add(reference.removeprefix("credential://"))
+    return used
 
 
 @app.post("/credentials/proxmox")
@@ -146,6 +158,25 @@ def generate_ssh_credential(name: str = Form(), _: User = Depends(current_user),
     private_key = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, serialization.NoEncryption()).decode()
     public_key = key.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode() + " cluster-builder"
     store_credential(db, name=name, kind=CredentialKind.SSH, secret_payload={"private_key": private_key}, public_data={"public_key": public_key})
+    return RedirectResponse("/credentials", status_code=303)
+
+
+@app.post("/credentials/{credential_id}/delete")
+def delete_credential(credential_id: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
+    credential = db.get(Credential, credential_id)
+    if not credential:
+        raise HTTPException(404)
+    active_clusters = db.scalars(select(Cluster).where(Cluster.status != ClusterStatus.DESTROYED)).all()
+    used_by = [
+        cluster.name
+        for cluster in active_clusters
+        if credential.id in credential_ids_used_by([cluster])
+    ]
+    if used_by:
+        raise HTTPException(409, "Credential wird noch von aktiven Clustern verwendet: " + ", ".join(sorted(used_by)))
+    db.add(AuditEvent(action="delete_credential", object_type="credential", object_id=credential.id, details={"name": credential.name, "kind": credential.kind.value}))
+    db.delete(credential)
+    db.commit()
     return RedirectResponse("/credentials", status_code=303)
 
 

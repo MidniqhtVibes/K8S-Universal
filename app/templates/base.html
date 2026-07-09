@@ -11,38 +11,75 @@
   <header>
     <a class="brand" href="/">Cluster Builder</a>
     {% if request.session.get('user_id') %}
-    <div class="header-actions"><span class="environment">Proxmox · Kubernetes</span><form action="/logout" method="post"><button class="link">Abmelden</button></form></div>
+    <div class="header-actions">
+      <span class="environment">Proxmox - Kubernetes</span>
+      <form action="/logout" method="post"><button class="link">Abmelden</button></form>
+    </div>
     {% endif %}
   </header>
+
   <div class="app-shell {% if not request.session.get('user_id') %}anonymous{% endif %}">
     {% if request.session.get('user_id') %}
     <aside class="sidebar">
-      <div class="sidebar-label">Verwaltung</div>
-      <nav>
-        <a href="/" class="{% if request.url.path == '/' or (request.url.path.startswith('/clusters/') and request.url.path != '/clusters/new') %}active{% endif %}"><span>▦</span> Cluster</a>
-        {% if sidebar_clusters %}
-        <div class="cluster-links">
-          {% for sidebar_cluster in sidebar_clusters %}
-          <div class="cluster-entry">
-            <a href="/clusters/{{ sidebar_cluster.id }}" class="cluster-link {% if request.url.path == '/clusters/' + sidebar_cluster.id %}active{% endif %}">
-              <span class="cluster-dot {{ sidebar_cluster.status.value }}"></span>
-              <span class="cluster-link-text">{{ sidebar_cluster.name }}</span>
-            </a>
-            <a href="/clusters/{{ sidebar_cluster.id }}/terminal" class="terminal-link {% if request.url.path == '/clusters/' + sidebar_cluster.id + '/terminal' %}active{% endif %}" title="kubectl Terminal">›_</a>
-          </div>
-          <a href="/clusters/{{ sidebar_cluster.id }}/applications" class="cluster-sub-link {% if '/clusters/' + sidebar_cluster.id + '/applications' in request.url.path %}active{% endif %}"><span>⌘</span> Anwendungen</a>
-          {% endfor %}
+      <div class="sidebar-top">
+        <div class="sidebar-head">
+          <div class="sidebar-label">Verwaltung</div>
+          <button type="button" class="sidebar-toggle" id="sidebar-toggle" aria-label="Sidebar einklappen" aria-pressed="false"><span></span></button>
         </div>
-        {% endif %}
-        <a href="/clusters/new" class="{% if request.url.path == '/clusters/new' %}active{% endif %}"><span>＋</span> Neuer Cluster</a>
-        <a href="/credentials" class="{% if request.url.path == '/credentials' %}active{% endif %}"><span>◆</span> Credentials</a>
-        <a href="/settings" class="{% if request.url.path == '/settings' %}active{% endif %}"><span>⚙</span> Einstellungen</a>
+
+        <nav class="sidebar-nav">
+          <details class="sidebar-section" data-sidebar-section="clusters" {% if request.url.path == '/' or request.url.path.startswith('/clusters') %}open{% endif %}>
+            <summary class="sidebar-summary {% if request.url.path == '/' or request.url.path.startswith('/clusters') %}active{% endif %}">
+              <span class="nav-icon">C</span>
+              <span class="nav-text">Cluster</span>
+              <span class="chevron"></span>
+            </summary>
+
+            <div class="cluster-links">
+              <a href="/" class="cluster-overview-link {% if request.url.path == '/' %}active{% endif %}">
+                <span class="nav-icon">O</span>
+                <span class="nav-text">Uebersicht</span>
+              </a>
+              {% for sidebar_cluster in sidebar_clusters %}
+              <div class="cluster-entry">
+                <a href="/clusters/{{ sidebar_cluster.id }}" class="cluster-link {% if request.url.path == '/clusters/' + sidebar_cluster.id %}active{% endif %}">
+                  <span class="cluster-dot {{ sidebar_cluster.status.value }}"></span>
+                  <span class="cluster-link-text">{{ sidebar_cluster.name }}</span>
+                </a>
+                <a href="/clusters/{{ sidebar_cluster.id }}/terminal" class="terminal-link {% if request.url.path == '/clusters/' + sidebar_cluster.id + '/terminal' %}active{% endif %}" title="kubectl Terminal">$_</a>
+              </div>
+              <a href="/clusters/{{ sidebar_cluster.id }}/applications" class="cluster-sub-link {% if '/clusters/' + sidebar_cluster.id + '/applications' in request.url.path %}active{% endif %}">
+                <span class="nav-icon">A</span>
+                <span class="nav-text">Anwendungen</span>
+              </a>
+              {% endfor %}
+              <a href="/clusters/new" class="new-cluster-link {% if request.url.path == '/clusters/new' %}active{% endif %}">
+                <span class="nav-icon">+</span>
+                <span class="nav-text">Neuer Cluster</span>
+              </a>
+            </div>
+          </details>
+        </nav>
+      </div>
+
+      <nav class="sidebar-bottom">
+        <a href="/credentials" class="{% if request.url.path == '/credentials' %}active{% endif %}">
+          <span class="nav-icon">K</span>
+          <span class="nav-text">Credentials</span>
+        </a>
+        <a href="/settings" class="{% if request.url.path == '/settings' %}active{% endif %}">
+          <span class="nav-icon">S</span>
+          <span class="nav-text">Einstellungen</span>
+        </a>
       </nav>
     </aside>
     {% endif %}
+
     <main>{% block content %}{% endblock %}</main>
   </div>
-  {% if request.session.get('user_id') and request.url.scheme != 'https' %}<div class="http-warning">HTTP aktiv: Zugangsdaten nur in einem vertrauenswürdigen internen Netz eingeben.</div>{% endif %}
+
+  {% if request.session.get('user_id') and request.url.scheme != 'https' %}<div class="http-warning">HTTP aktiv: Zugangsdaten nur in einem vertrauenswuerdigen internen Netz eingeben.</div>{% endif %}
   {% block scripts %}{% endblock %}
+  {% if request.session.get('user_id') %}<script src="/static/sidebar.js"></script>{% endif %}
 </body>
 </html>
