@@ -116,6 +116,12 @@ def suggest_allocations(
     used_ips, used_ids = used_allocations(db, exclude_cluster_id)
     used_ids |= extra_used_vm_ids or set()
     used_ips |= parse_reserved_ips(str(preferences.get("reserved_ips", "")))
+    network = ipaddress.IPv4Network(str(preferences["network_cidr"]), strict=True)
+    used_ips |= {
+        network.network_address,
+        network.broadcast_address,
+        ipaddress.IPv4Address(str(preferences["gateway"])),
+    }
     vip = _first_ip_block(preferences["vip_pool_start"], preferences["vip_pool_end"], 1, used_ips)
     used_ips.add(ipaddress.IPv4Address(vip))
     result: dict[str, Any] = {"api_vip": vip, **{f"{key}_count": value for key, value in counts.items()}}
@@ -134,7 +140,9 @@ def validate_preference_config(config: dict[str, Any]) -> dict[str, Any]:
     network = ipaddress.ip_network(str(merged["network_cidr"]), strict=True)
     if not isinstance(network, ipaddress.IPv4Network):
         raise ValueError("Nur IPv4-Netze werden unterstützt")
-    ipaddress.IPv4Address(str(merged["gateway"]))
+    gateway = ipaddress.IPv4Address(str(merged["gateway"]))
+    if gateway not in network or gateway in (network.network_address, network.broadcast_address):
+        raise ValueError("Gateway muss eine nutzbare Host-Adresse im VM-Netz sein")
     for dns_server in str(merged["dns_servers"]).split(","):
         ipaddress.IPv4Address(dns_server.strip())
     pod_network = ipaddress.ip_network(str(merged["pod_cidr"]), strict=True)
@@ -142,22 +150,46 @@ def validate_preference_config(config: dict[str, Any]) -> dict[str, Any]:
     if network.overlaps(pod_network) or network.overlaps(service_network) or pod_network.overlaps(service_network):
         raise ValueError("VM-, Pod- und Service-Netze dürfen sich nicht überschneiden")
     parse_reserved_ips(str(merged.get("reserved_ips", "")))
+    ip_ranges: dict[str, tuple[ipaddress.IPv4Address, ipaddress.IPv4Address]] = {}
     for role in ("vip_pool", "lb_ip", "cp_ip", "worker_ip"):
         start = ipaddress.IPv4Address(str(merged[f"{role}_start"]))
         end = ipaddress.IPv4Address(str(merged[f"{role}_end"]))
         if start not in network or end not in network or int(start) > int(end):
             raise ValueError(f"Ungültiger IP-Pool: {role}")
+        if start in (network.network_address, network.broadcast_address) or end in (network.network_address, network.broadcast_address):
+            raise ValueError(f"IP-Pool {role} darf Netz- und Broadcast-Adresse nicht enthalten")
+        if int(start) <= int(gateway) <= int(end):
+            raise ValueError(f"IP-Pool {role} darf das Gateway nicht enthalten")
+        ip_ranges[role] = (start, end)
+    range_names = list(ip_ranges)
+    for index, left_name in enumerate(range_names):
+        left_start, left_end = ip_ranges[left_name]
+        for right_name in range_names[index + 1 :]:
+            right_start, right_end = ip_ranges[right_name]
+            if int(left_start) <= int(right_end) and int(right_start) <= int(left_end):
+                raise ValueError(f"IP-Pools {left_name} und {right_name} überschneiden sich")
+    id_ranges: dict[str, tuple[int, int]] = {}
     for role in ("lb", "cp", "worker"):
         start = int(merged[f"{role}_vm_id_start"])
         end = int(merged[f"{role}_vm_id_end"])
         if start < 100 or start > end:
             raise ValueError(f"Ungültiger VM-ID-Pool: {role}")
+        id_ranges[role] = (start, end)
+    id_roles = list(id_ranges)
+    for index, left_role in enumerate(id_roles):
+        left_start, left_end = id_ranges[left_role]
+        for right_role in id_roles[index + 1 :]:
+            right_start, right_end = id_ranges[right_role]
+            if left_start <= right_end and right_start <= left_end:
+                raise ValueError(f"VM-ID-Pools {left_role} und {right_role} überschneiden sich")
     if int(merged["cp_count"]) not in (3, 5, 7):
         raise ValueError("Control-Plane-Standardanzahl muss 3, 5 oder 7 sein")
     for role in ("lb", "cp", "worker"):
         count = int(merged[f"{role}_count"])
         if count < (2 if role == "lb" else 1):
             raise ValueError(f"Ungültige Standardanzahl: {role}")
+        if role == "lb" and count > 10:
+            raise ValueError("Höchstens zehn Load Balancer werden unterstützt")
         ip_capacity = int(ipaddress.IPv4Address(merged[f"{role}_ip_end"])) - int(ipaddress.IPv4Address(merged[f"{role}_ip_start"])) + 1
         id_capacity = int(merged[f"{role}_vm_id_end"]) - int(merged[f"{role}_vm_id_start"]) + 1
         if count > ip_capacity or count > id_capacity:

@@ -42,11 +42,11 @@ def test_package_install_waits_for_cloud_init_and_apt_locks():
     assert "wait_for_connection" in wait
     assert "any_errors_fatal: true" in wait
     assert "timeout 900 cloud-init status --wait" in wait
-    assert "timeout 900 cloud-init status --wait" in bootstrap
+    assert "timeout 900 cloud-init status --wait" not in bootstrap
     assert "async:" not in wait
     assert "async:" not in bootstrap
-    assert "cloud_init_status.rc not in [0, 2]" in bootstrap
-    assert "'errors: []' not in cloud_init_status.stdout" in bootstrap
+    assert "cloud_init_status.rc not in [0, 2]" in wait
+    assert "'errors: []' not in cloud_init_status.stdout" in wait
     assert "lock_timeout: 600" in bootstrap
     assert "dpkg --configure -a" in bootstrap
 
@@ -61,3 +61,18 @@ def test_kubernetes_apt_keyring_is_rebuilt_safely():
     assert "mv \"${final_tmp}\" \"${final_keyring}\"" in packages
     assert "creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg" not in packages
     assert "update_cache_retries: 5" in packages
+
+
+def test_load_balancer_uses_cluster_variables_and_hides_disabled_ingress():
+    playbook = (Path(__file__).parents[1] / "ansible/playbooks/02-loadbalancer.yml").read_text(encoding="utf-8")
+    assert "virtual_router_id {{ keepalived_virtual_router_id }}" in playbook
+    assert "virtual_router_id 51" not in playbook
+    assert "{% if ingress_enabled %}" in playbook
+    assert "150 - groups['loadbalancer'].index(inventory_hostname)" in playbook
+    assert "254 - groups['loadbalancer'].index(inventory_hostname)" not in playbook
+    assert "weight 2" in playbook
+
+
+def test_calico_block_size_is_generated_per_pod_network():
+    playbook = (Path(__file__).parents[1] / "ansible/playbooks/08-install-cni.yml").read_text(encoding="utf-8")
+    assert "blockSize: {{ calico_block_size }}" in playbook

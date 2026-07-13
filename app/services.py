@@ -1,14 +1,14 @@
 import ipaddress
-import json
 import uuid
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .generator import config_hash, render_cluster
 from .allocations import validate_cluster_allocations
-from .models import AuditEvent, Cluster, Credential, CredentialKind, Job, JobKind, JobStatus, User
+from .models import AuditEvent, Cluster, ClusterStatus, Credential, CredentialKind, Job, JobKind, JobStatus, User
 from .schemas import ClusterConfig
 from .security import decrypt_payload, encrypt_payload, hash_password
 
@@ -28,16 +28,25 @@ def store_credential(
     secret_payload: dict,
     public_data: dict,
 ) -> Credential:
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise ValueError("Credential-Name darf nicht leer sein")
+    if db.scalar(select(Credential).where(Credential.name == normalized_name, Credential.kind == kind)):
+        raise ValueError("Ein Credential mit diesem Namen und Typ existiert bereits")
     credential = Credential(
-        name=name.strip(),
+        name=normalized_name,
         kind=kind,
         encrypted_payload=encrypt_payload(secret_payload),
         public_data=public_data,
     )
     db.add(credential)
-    db.flush()
-    db.add(AuditEvent(action="create_credential", object_type="credential", object_id=credential.id, details={"name": name, "kind": kind.value}))
-    db.commit()
+    try:
+        db.flush()
+        db.add(AuditEvent(action="create_credential", object_type="credential", object_id=credential.id, details={"name": name, "kind": kind.value}))
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError("Ein Credential mit diesem Namen und Typ existiert bereits") from exc
     return credential
 
 
@@ -47,6 +56,34 @@ def credential_payload(db: Session, reference: str, expected: CredentialKind) ->
     if credential is None or credential.kind != expected:
         raise ValueError(f"Credential {reference} ist nicht verfügbar")
     return decrypt_payload(credential.encrypted_payload)
+
+
+def bind_proxmox_credential(db: Session, form: dict[str, str]) -> dict[str, str]:
+    """Return form values with trusted connection data from the selected credential.
+
+    Endpoint and TLS policy used to be independently editable in the cluster
+    wizard. Discovery then used the credential values while Terraform used the
+    form values, so the two phases could contact different endpoints or use
+    different certificate verification. The credential is now the single
+    source of truth for both values.
+    """
+    reference = form.get("proxmox_credential", "")
+    if not reference.startswith("credential://"):
+        raise ValueError("Proxmox-Credential nicht gefunden")
+    credential = db.get(Credential, reference.removeprefix("credential://"))
+    if not credential or credential.kind != CredentialKind.PROXMOX:
+        raise ValueError("Proxmox-Credential nicht gefunden")
+    credential_payload(db, reference, CredentialKind.PROXMOX)
+    endpoint = str(credential.public_data.get("endpoint", "")).strip()
+    if not endpoint:
+        raise ValueError("Proxmox-Credential enthält keinen Endpoint")
+    trusted = dict(form)
+    trusted["proxmox_endpoint"] = endpoint
+    if bool(credential.public_data.get("verify_tls", True)):
+        trusted["verify_tls"] = "on"
+    else:
+        trusted.pop("verify_tls", None)
+    return trusted
 
 
 def build_cluster_from_form(form: dict[str, str], cluster_id: str | None = None) -> ClusterConfig:
@@ -94,13 +131,13 @@ def build_cluster_from_form(form: dict[str, str], cluster_id: str | None = None)
         },
         "ssh": {
             "user": form["ssh_user"].strip(),
-            "port": int(form.get("ssh_port", 22)),
+            "port": 22,
             "public_key": public_key,
             "credential_ref": form["ssh_credential"],
         },
         "kubernetes": {
             "version": form["kubernetes_version"].strip(),
-            "api_port": int(form["api_port"]),
+            "api_port": 6443,
             "pod_cidr": form["pod_cidr"],
             "service_cidr": form["service_cidr"],
         },
@@ -113,6 +150,7 @@ def build_cluster_from_form(form: dict[str, str], cluster_id: str | None = None)
                 "replicas": int(form["traefik_replicas"]),
                 "http_node_port": int(form["http_node_port"]),
                 "https_node_port": int(form["https_node_port"]),
+                "chart_version": "40.2.0",
             },
         },
     })
@@ -123,18 +161,34 @@ def save_cluster(db: Session, config: ClusterConfig, data_root: Path, source_roo
     public = config.public_dict()
     digest = config_hash(public)
     cluster = db.get(Cluster, config.id)
+    configuration_changed = False
+    duplicate = db.scalar(select(Cluster).where(Cluster.name == config.name, Cluster.id != config.id))
+    if duplicate:
+        raise ValueError("Ein Cluster mit diesem Namen existiert bereits")
     if cluster is None:
         cluster = Cluster(id=config.id, name=config.name, config=public, config_hash=digest)
         db.add(cluster)
     else:
+        configuration_changed = cluster.config_hash != digest
+        if configuration_changed and not cluster.applied_vm_ids:
+            cluster.applied_vm_ids = [int(node["vm_id"]) for node in cluster.config.get("nodes", [])]
         cluster.name = config.name
         cluster.config = public
         cluster.config_hash = digest
-        cluster.planned_hash = None
-        cluster.destroy_planned_hash = None
+        if configuration_changed:
+            cluster.status = ClusterStatus.DRAFT
+            cluster.planned_hash = None
+            cluster.destroy_planned_hash = None
     render_cluster(config, data_root / "clusters" / config.id, source_root)
     db.add(AuditEvent(action="save_cluster", object_type="cluster", object_id=config.id, details={"config_hash": digest}))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError("Ein Cluster mit diesem Namen existiert bereits") from exc
+    if configuration_changed:
+        # An old kubeconfig must never look valid for newly edited addresses.
+        (data_root / "clusters" / config.id / "kubeconfig").unlink(missing_ok=True)
     return cluster
 
 
@@ -150,8 +204,22 @@ def queue_job(db: Session, cluster: Cluster, kind: JobKind, payload: dict | None
         raise ValueError("Konfiguration wurde seit dem Terraform-Plan geändert")
     if kind == JobKind.DESTROY and cluster.destroy_planned_hash != cluster.config_hash:
         raise ValueError("Es liegt kein aktueller bestätigbarer Destroy-Plan vor")
+    runtime_jobs = {
+        JobKind.ANSIBLE,
+        JobKind.VERIFY,
+        JobKind.MANIFEST_VALIDATE,
+        JobKind.MANIFEST_DIFF,
+        JobKind.MANIFEST_APPLY,
+        JobKind.MANIFEST_DELETE,
+    }
+    if kind in runtime_jobs and cluster.applied_hash != cluster.config_hash:
+        raise ValueError("Die gespeicherte Konfiguration wurde noch nicht erfolgreich mit Terraform angewendet")
     job = Job(cluster_id=cluster.id, kind=kind, requested_config_hash=cluster.config_hash, payload=payload or {})
     db.add(job)
     db.add(AuditEvent(action=f"queue_{kind.value}", object_type="cluster", object_id=cluster.id))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValueError("Ein Cluster mit diesem Namen existiert bereits") from exc
     return job

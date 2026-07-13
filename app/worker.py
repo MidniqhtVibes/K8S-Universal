@@ -1,30 +1,37 @@
 import copy
 import json
 import os
+import queue
 import re
+import shlex
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import UTC, datetime, timedelta
+from ipaddress import IPv4Address, IPv4Interface
 from pathlib import Path
 
+import httpx
 import yaml
 from sqlalchemy import select
 
 from .config import get_settings
 from .db import SessionLocal
-from .generator import render_cluster
+from .generator import proxmox_vm_name, render_cluster
 from .manifests import render_snapshot
-from .models import ApplicationBundle, Cluster, ClusterStatus, Job, JobKind, JobStatus, ManifestRevision
+from .models import ApplicationBundle, Cluster, ClusterStatus, CredentialKind, Job, JobKind, JobStatus, ManifestRevision
+from .proxmox import ProxmoxClient
 from .schemas import ClusterConfig
 from .security import redact
 from .services import credential_payload
-from .models import CredentialKind
-from .proxmox import ProxmoxClient
+from .terraform_state import managed_vm_ids
 
 
 settings = get_settings()
+CLUSTER_FAILURE_JOB_KINDS = frozenset({JobKind.APPLY, JobKind.ANSIBLE, JobKind.VERIFY, JobKind.DESTROY})
+MUTATING_JOB_KINDS = frozenset({JobKind.APPLY, JobKind.ANSIBLE, JobKind.DESTROY})
 
 
 class JobCancelled(RuntimeError):
@@ -56,7 +63,7 @@ def run_command(
     allowed_codes: frozenset[int] = frozenset({0}),
 ) -> int:
     ensure_not_cancelled(job.id)
-    append_log(job.id, f"\n$ {' '.join(command)}\n")
+    append_log(job.id, f"\n$ {' '.join(command)}\n", secrets)
     process = subprocess.Popen(
         command,
         cwd=cwd,
@@ -67,18 +74,44 @@ def run_command(
         bufsize=1,
     )
     assert process.stdout is not None
-    for line in process.stdout:
-        append_log(job.id, line, secrets)
+    output: queue.Queue[str | None] = queue.Queue()
+
+    def read_output() -> None:
         try:
+            for line in process.stdout:
+                output.put(line)
+        finally:
+            output.put(None)
+
+    reader = threading.Thread(target=read_output, name=f"job-output-{job.id}", daemon=True)
+    reader.start()
+    output_finished = False
+    last_heartbeat = time.monotonic()
+    try:
+        while process.poll() is None or not output_finished:
+            try:
+                item = output.get(timeout=0.5)
+                if item is None:
+                    output_finished = True
+                else:
+                    append_log(job.id, item, secrets)
+            except queue.Empty:
+                pass
             ensure_not_cancelled(job.id)
-        except JobCancelled:
+            if time.monotonic() - last_heartbeat >= 10:
+                append_log(job.id, "")
+                last_heartbeat = time.monotonic()
+    except JobCancelled:
+        if process.poll() is None:
             process.terminate()
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-            raise
+        raise
+    finally:
+        reader.join(timeout=1)
     code = process.wait()
     if code not in allowed_codes:
         raise RuntimeError(f"Befehl fehlgeschlagen ({code}): {' '.join(command)}")
@@ -96,11 +129,8 @@ def create_terraform_plan(
     secrets: list[str],
     *,
     destroy: bool = False,
-    announce_apply: bool = True,
 ) -> None:
     plan_name = "destroy.tfplan" if destroy else "tfplan"
-    if announce_apply and not destroy:
-        append_log(job.id, "Terraform-Plan wird fuer den aktuellen Apply neu erzeugt.\n")
     run_command(job, ["terraform", "init", "-input=false"], terraform_dir, env, secrets)
     run_command(job, ["terraform", "validate"], terraform_dir, env, secrets)
     command = ["terraform", "plan", "-input=false", terraform_parallelism_arg(), "-out", plan_name]
@@ -137,7 +167,9 @@ def extract_ansible_failure(log: str) -> tuple[str | None, str | None, str | Non
     for match in re.finditer(r"^fatal: \[([^\]]+)\]: FAILED! => (.+)$", log, re.MULTILINE):
         fatal = match
     if not fatal:
-        return None, task, None
+        # A later Helm/kubectl failure must not be attributed to the final
+        # successful Ansible task that merely remains in the shared job log.
+        return None, None, None
     host = fatal.group(1)
     raw_payload = fatal.group(2).strip()
     cause = raw_payload
@@ -184,6 +216,11 @@ def failure_summary(error: Exception, log: str = "") -> str | None:
         return "Kurzdiagnose: Nicht alle VMs waren per SSH erreichbar.\nNaechster Schritt: " + recommended_next_step(text)
     if "CoreDNS" in text:
         return "Kurzdiagnose: CoreDNS wurde nicht rechtzeitig bereit.\nNaechster Schritt: " + recommended_next_step(text)
+    if "helm upgrade" in text or "helm install" in text:
+        return (
+            "Kurzdiagnose: Der Helm-Release wurde nicht erfolgreich bereit.\n"
+            "Naechster Schritt: Pod-Status, Service-Typ und Events im Ziel-Namespace pruefen."
+        )
     if "Befehl fehlgeschlagen" in text:
         return "Kurzdiagnose: Ein externer Terraform-, Ansible-, Helm- oder kubectl-Befehl ist fehlgeschlagen.\nNaechster Schritt: " + recommended_next_step(text)
     return None
@@ -202,14 +239,38 @@ def wait_for_ssh(job: Job, config: ClusterConfig) -> None:
             except OSError:
                 pass
         if pending:
+            append_log(job.id, "")
             time.sleep(5)
     if pending:
         raise RuntimeError(f"SSH-Timeout für: {', '.join(sorted(pending))}")
 
 
+def configured_guest_ipv4_addresses(guest_config: dict) -> set[IPv4Address]:
+    """Extract static IPv4 addresses from Proxmox QEMU/LXC network fields."""
+    addresses: set[IPv4Address] = set()
+    for key, value in guest_config.items():
+        if not re.fullmatch(r"(?:ipconfig|net)\d+", str(key)):
+            continue
+        for option in str(value).split(","):
+            name, separator, raw_value = option.partition("=")
+            if not separator or name.strip() != "ip":
+                continue
+            candidate = raw_value.strip()
+            if candidate.lower() in {"dhcp", "manual"}:
+                continue
+            try:
+                addresses.add(IPv4Interface(candidate).ip)
+            except ValueError:
+                # IPv6 values and malformed third-party metadata are not IPv4
+                # allocations and must not create a false collision.
+                continue
+    return addresses
+
+
 def validate_proxmox(job: Job, config: ClusterConfig, api_token: str, workspace: Path) -> None:
     append_log(job.id, "Proxmox-Ressourcen und Konflikte werden geprüft …\n")
-    discovery = ProxmoxClient(config.proxmox.endpoint, api_token, config.proxmox.verify_tls).discover()
+    client = ProxmoxClient(config.proxmox.endpoint, api_token, config.proxmox.verify_tls)
+    discovery = client.discover()
     node_names = {item.get("node") for item in discovery.get("nodes", [])}
     if config.proxmox.node not in node_names:
         raise RuntimeError(f"Proxmox-Node {config.proxmox.node} ist nicht verfügbar")
@@ -221,19 +282,77 @@ def validate_proxmox(job: Job, config: ClusterConfig, api_token: str, workspace:
     if config.proxmox.bridge not in bridges:
         raise RuntimeError(f"Bridge {config.proxmox.bridge} ist auf {config.proxmox.node} nicht verfügbar")
     resources = discovery.get("vms", [])
-    templates = {int(item["vmid"]) for item in resources if item.get("template") == 1 and item.get("vmid") is not None}
+    templates = {
+        int(item["vmid"])
+        for item in resources
+        if item.get("template") in (1, True, "1")
+        and item.get("type") == "qemu"
+        and item.get("node") == config.proxmox.node
+        and item.get("vmid") is not None
+    }
     if config.proxmox.template_vm_id not in templates:
-        raise RuntimeError(f"Template-VM {config.proxmox.template_vm_id} wurde nicht gefunden")
-    if not (workspace / "terraform" / "terraform.tfstate").exists():
-        used_ids = {int(item["vmid"]) for item in resources if item.get("vmid") is not None}
-        collisions = sorted({node.vm_id for node in config.nodes} & used_ids)
-        if collisions:
-            raise RuntimeError(f"VM-IDs sind bereits belegt: {', '.join(map(str, collisions))}")
+        raise RuntimeError(
+            f"QEMU-Template {config.proxmox.template_vm_id} wurde auf Node {config.proxmox.node} nicht gefunden"
+        )
+    used_ids = {int(item["vmid"]) for item in resources if item.get("vmid") is not None}
+    owned_ids = managed_vm_ids(workspace / "terraform" / "terraform.tfstate")
+    collisions = sorted({node.vm_id for node in config.nodes} & (used_ids - owned_ids))
+    if collisions:
+        raise RuntimeError(f"VM-IDs sind bereits durch fremde Ressourcen belegt: {', '.join(map(str, collisions))}")
+
+    foreign_resources = [
+        item for item in resources
+        if item.get("vmid") is not None and int(item["vmid"]) not in owned_ids
+    ]
+    planned_names = {
+        (
+            proxmox_vm_name(config.name, node.name)
+            if config.proxmox.vm_name_include_cluster
+            else node.name
+        )
+        for node in config.nodes
+    }
+    name_conflicts = sorted(
+        {
+            (str(item["name"]), int(item["vmid"]))
+            for item in foreign_resources
+            if item.get("name") in planned_names
+        }
+    )
+    if name_conflicts:
+        conflict_details = ", ".join(
+            f"{name} (VM-ID {vm_id})" for name, vm_id in name_conflicts
+        )
+        raise RuntimeError(
+            f"Proxmox-Namen sind bereits durch fremde Ressourcen belegt: {conflict_details}"
+        )
+
+    requested_addresses = {config.network.api_vip, *(node.ip for node in config.nodes)}
+    ip_conflicts: set[tuple[str, int, str]] = set()
+    for resource in foreign_resources:
+        if resource.get("template") in (1, True, "1"):
+            continue
+        if resource.get("type") not in {"qemu", "lxc"}:
+            continue
+        guest_addresses = configured_guest_ipv4_addresses(client.guest_config(resource))
+        for address in requested_addresses & guest_addresses:
+            ip_conflicts.add(
+                (str(address), int(resource["vmid"]), str(resource.get("name") or "ohne Name"))
+            )
+    if ip_conflicts:
+        conflict_details = ", ".join(
+            f"{address} (VM-ID {vm_id}, {name})"
+            for address, vm_id, name in sorted(ip_conflicts)
+        )
+        raise RuntimeError(
+            "IP-Adressen sind bereits in fremden Proxmox-Gaesten konfiguriert: "
+            + conflict_details
+        )
     append_log(job.id, "Proxmox-Prüfung erfolgreich.\n")
 
 
-def ingress_test_commands(documents: list[dict], api_vip: str) -> list[str]:
-    commands: list[str] = []
+def ingress_test_targets(documents: list[dict], api_vip: str) -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for document in documents:
         if not isinstance(document, dict):
@@ -261,8 +380,35 @@ def ingress_test_commands(documents: list[dict], api_vip: str) -> list[str]:
                 if key in seen:
                     continue
                 seen.add(key)
-                commands.append(f'curl -v -H "Host: {host}" http://{api_vip}{path}')
-    return commands
+                targets.append((f"http://{api_vip}{path}", host))
+    return targets
+
+
+def ingress_test_commands(documents: list[dict], api_vip: str) -> list[str]:
+    """Build copyable, shell-safe curl commands for all declared Ingress paths."""
+    return [
+        shlex.join(["curl", "-v", "-H", f"Host: {host}", url])
+        for url, host in ingress_test_targets(documents, api_vip)
+    ]
+
+
+def run_ingress_tests(job: Job, documents: list[dict], api_vip: str) -> None:
+    targets = ingress_test_targets(documents, api_vip)
+    if not targets:
+        append_log(job.id, "\nKein Ingress-Host im Bundle gefunden; es wurde weder ein HTTP-Test noch ein Curl-Testbefehl erzeugt.\n")
+        return
+    append_log(job.id, "\nHTTP-Funktionstest über die Cluster-VIP:\n")
+    with httpx.Client(timeout=10, follow_redirects=False) as client:
+        for url, host in targets:
+            ensure_not_cancelled(job.id)
+            try:
+                response = client.get(url, headers={"Host": host})
+                append_log(job.id, f"{host} {url} -> HTTP {response.status_code}\n")
+            except httpx.HTTPError as exc:
+                append_log(job.id, f"{host} {url} -> nicht erreichbar: {exc}\n")
+    commands = ingress_test_commands(documents, api_vip)
+    append_log(job.id, "\nManueller Curl-Test (auf einem Host mit Zugriff auf die Cluster-VIP):\n")
+    append_log(job.id, "".join(f"{command}\n" for command in commands))
 
 
 def run_ansible_stack(
@@ -279,9 +425,44 @@ def run_ansible_stack(
     if config.addons.ingress.enabled:
         run_command(job, ["helm", "repo", "add", "traefik", "https://traefik.github.io/charts", "--force-update"], workspace, env, secrets)
         run_command(job, ["helm", "repo", "update"], workspace, env, secrets)
-        run_command(job, ["helm", "upgrade", "--install", "traefik", "traefik/traefik", "--namespace", "traefik", "--create-namespace", "-f", str(workspace / "generated" / "traefik-values.yaml"), "--kubeconfig", str(kubeconfig)], workspace, env, secrets)
+        run_command(
+            job,
+            [
+                "helm", "upgrade", "--install", "traefik", "traefik/traefik",
+                "--version", config.addons.ingress.chart_version,
+                "--namespace", "traefik", "--create-namespace",
+                "--wait", "--wait-for-jobs", "--timeout", "10m",
+                "-f", str(workspace / "generated" / "traefik-values.yaml"),
+                "--kubeconfig", str(kubeconfig),
+            ],
+            workspace,
+            env,
+            secrets,
+        )
         run_command(job, ["ansible-playbook", "-i", "inventory.generated.yml", "playbooks/02-loadbalancer.yml"], ansible_dir, env, secrets)
-    verify_cluster(job, workspace, env, secrets)
+    verify_cluster(job, config, workspace, env, secrets)
+
+
+def invalidate_plan_authorization(
+    cluster_id: str,
+    *,
+    destroy: bool = False,
+    status: ClusterStatus | None = None,
+) -> None:
+    """Atomically consume or invalidate a reviewed Terraform plan."""
+    with SessionLocal() as db:
+        cluster = db.get(Cluster, cluster_id)
+        if not cluster:
+            raise RuntimeError("Cluster nicht gefunden")
+        if destroy:
+            cluster.destroy_planned_hash = None
+        else:
+            cluster.planned_hash = None
+            if status is None and cluster.applied_hash != cluster.config_hash:
+                cluster.status = ClusterStatus.DRAFT
+        if status is not None:
+            cluster.status = status
+        db.commit()
 
 
 def execute(job_id: str) -> None:
@@ -322,28 +503,46 @@ def execute(job_id: str) -> None:
         env["CLUSTER_KUBECONFIG_DEST"] = str(kubeconfig)
 
         if job.kind in (JobKind.PLAN, JobKind.DESTROY_PLAN):
+            invalidate_plan_authorization(config.id, destroy=job.kind == JobKind.DESTROY_PLAN)
             if job.kind == JobKind.PLAN:
                 validate_proxmox(job, config, token, workspace)
-            create_terraform_plan(job, terraform_dir, env, secrets, destroy=job.kind == JobKind.DESTROY_PLAN, announce_apply=False)
+            create_terraform_plan(job, terraform_dir, env, secrets, destroy=job.kind == JobKind.DESTROY_PLAN)
             with SessionLocal() as db:
                 cluster = db.get(Cluster, config.id)
                 if cluster:
                     if job.kind == JobKind.PLAN:
                         cluster.planned_hash = job.requested_config_hash
-                        cluster.status = ClusterStatus.PLANNED
+                        if cluster.applied_hash != cluster.config_hash:
+                            cluster.status = ClusterStatus.PLANNED
                     else:
                         cluster.destroy_planned_hash = job.requested_config_hash
                     db.commit()
             return
 
         if job.kind == JobKind.APPLY:
-            create_terraform_plan(job, terraform_dir, env, secrets)
+            plan_path = terraform_dir / "tfplan"
+            if not plan_path.is_file():
+                raise RuntimeError("Der geprüfte Terraform-Plan fehlt; bitte einen neuen Plan erstellen")
+            # A reviewed plan may remain queued while the Proxmox environment
+            # changes. Re-run the read-only collision checks directly before
+            # consuming and applying it to close that race window.
+            validate_proxmox(job, config, token, workspace)
+            invalidate_plan_authorization(config.id, status=ClusterStatus.APPLYING)
+            try:
+                run_command(job, ["terraform", "apply", "-input=false", terraform_parallelism_arg(), "tfplan"], terraform_dir, env, secrets)
+            finally:
+                plan_path.unlink(missing_ok=True)
+            state_ids = managed_vm_ids(terraform_dir / "terraform.tfstate")
+            expected_ids = {node.vm_id for node in config.nodes}
+            if not expected_ids <= state_ids:
+                missing = ", ".join(map(str, sorted(expected_ids - state_ids)))
+                raise RuntimeError(f"Terraform-State enthält nicht alle erwarteten VM-IDs: {missing}")
             with SessionLocal() as db:
                 cluster = db.get(Cluster, config.id)
                 if cluster:
-                    cluster.status = ClusterStatus.APPLYING
+                    cluster.applied_hash = job.requested_config_hash
+                    cluster.applied_vm_ids = sorted(state_ids)
                     db.commit()
-            run_command(job, ["terraform", "apply", "-input=false", terraform_parallelism_arg(), "tfplan"], terraform_dir, env, secrets)
             run_ansible_stack(job, config, workspace, ansible_dir, kubeconfig, env, secrets)
             with SessionLocal() as db:
                 cluster = db.get(Cluster, config.id)
@@ -368,15 +567,29 @@ def execute(job_id: str) -> None:
             return
 
         if job.kind == JobKind.VERIFY:
-            verify_cluster(job, workspace, env, secrets)
+            verify_cluster(job, config, workspace, env, secrets)
+            with SessionLocal() as db:
+                cluster = db.get(Cluster, config.id)
+                if cluster and cluster.applied_hash == cluster.config_hash:
+                    cluster.status = ClusterStatus.READY
+                    db.commit()
             return
 
         if job.kind == JobKind.DESTROY:
-            run_command(job, ["terraform", "apply", "-input=false", terraform_parallelism_arg(), "destroy.tfplan"], terraform_dir, env, secrets)
+            plan_path = terraform_dir / "destroy.tfplan"
+            invalidate_plan_authorization(config.id, destroy=True, status=ClusterStatus.APPLYING)
+            if not plan_path.is_file():
+                raise RuntimeError("Der geprüfte Destroy-Plan fehlt; bitte einen neuen Destroy-Plan erstellen")
+            try:
+                run_command(job, ["terraform", "apply", "-input=false", terraform_parallelism_arg(), "destroy.tfplan"], terraform_dir, env, secrets)
+            finally:
+                plan_path.unlink(missing_ok=True)
             with SessionLocal() as db:
                 cluster = db.get(Cluster, config.id)
                 if cluster:
                     cluster.status = ClusterStatus.DESTROYED
+                    cluster.applied_hash = None
+                    cluster.applied_vm_ids = []
                     cluster.planned_hash = None
                     cluster.destroy_planned_hash = None
                     db.commit()
@@ -448,19 +661,36 @@ def execute_manifest_job(job: Job, cluster: Cluster, workspace: Path) -> None:
     append_log(job.id, "Anwendungs-Bundle erfolgreich angewendet.\n")
     api_vip = str(cluster.config.get("network", {}).get("api_vip", "")).strip()
     if api_vip:
-        commands = ingress_test_commands(documents, api_vip)
-        if commands:
-            append_log(job.id, "\nFunktionstest ueber die Cluster-VIP:\n")
-            append_log(job.id, "".join(f"$ {command}\n" for command in commands))
-        else:
-            append_log(job.id, "\nKein Ingress-Host im Bundle gefunden; es wurde kein Curl-Test erzeugt.\n")
+        run_ingress_tests(job, documents, api_vip)
 
 
-def verify_cluster(job: Job, workspace: Path, env: dict[str, str], secrets: list[str]) -> None:
+def verify_cluster(job: Job, config: ClusterConfig, workspace: Path, env: dict[str, str], secrets: list[str]) -> None:
     kubeconfig = workspace / "kubeconfig"
-    run_command(job, ["kubectl", "--kubeconfig", str(kubeconfig), "get", "nodes", "-o", "wide"], workspace, env, secrets)
-    run_command(job, ["kubectl", "--kubeconfig", str(kubeconfig), "get", "pods", "-A"], workspace, env, secrets)
-    run_command(job, ["kubectl", "--kubeconfig", str(kubeconfig), "get", "--raw=/readyz?verbose"], workspace, env, secrets)
+    if not kubeconfig.is_file():
+        raise RuntimeError("Cluster-Verifikation benötigt eine vorhandene Kubeconfig")
+    kubectl = ["kubectl", "--kubeconfig", str(kubeconfig)]
+    expected_nodes = [node.name for node in config.nodes if node.role in ("control_plane", "worker")]
+    run_command(
+        job,
+        [*kubectl, "wait", "--for=condition=Ready", "--timeout=300s", *[f"node/{name}" for name in expected_nodes]],
+        workspace,
+        env,
+        secrets,
+    )
+    run_command(
+        job,
+        [
+            *kubectl, "wait", "pods", "--all", "--all-namespaces",
+            "--field-selector=status.phase!=Succeeded,status.phase!=Failed",
+            "--for=condition=Ready", "--timeout=300s",
+        ],
+        workspace,
+        env,
+        secrets,
+    )
+    run_command(job, [*kubectl, "get", "nodes", "-o", "wide"], workspace, env, secrets)
+    run_command(job, [*kubectl, "get", "pods", "-A"], workspace, env, secrets)
+    run_command(job, [*kubectl, "get", "--raw=/readyz?verbose"], workspace, env, secrets)
 
 
 def claim_job() -> str | None:
@@ -488,18 +718,16 @@ def fail_running_job(db, job: Job, reason: str) -> None:
     job.finished_at = now
     job.heartbeat_at = now
     job.log = (job.log or "") + f"\nFEHLER: {reason}\n"
-    if not is_manifest_job(job.kind):
+    if job.kind in CLUSTER_FAILURE_JOB_KINDS:
         cluster = db.get(Cluster, job.cluster_id)
         if cluster:
             cluster.status = ClusterStatus.FAILED
 
 
 def recover_interrupted_jobs() -> None:
-    with SessionLocal() as db:
-        jobs = db.scalars(select(Job).where(Job.status == JobStatus.RUNNING)).all()
-        for job in jobs:
-            fail_running_job(db, job, "Worker wurde neu gestartet, waehrend dieser Job lief. Bitte Job erneut starten.")
-        db.commit()
+    # A second worker may start while the first one legitimately owns a job.
+    # Heartbeats distinguish abandoned work without invalidating active jobs.
+    recover_stale_running_jobs()
 
 
 def recover_stale_running_jobs() -> None:
@@ -523,14 +751,14 @@ def finish_job(job_id: str, error: Exception | None = None) -> None:
         if isinstance(error, JobCancelled):
             job.status = JobStatus.CANCELLED
             job.error = str(error)
-            if job.kind in (JobKind.APPLY, JobKind.DESTROY):
+            if job.kind in MUTATING_JOB_KINDS:
                 cluster = db.get(Cluster, job.cluster_id)
                 if cluster:
                     cluster.status = ClusterStatus.FAILED
         elif error:
             job.status = JobStatus.FAILED
             job.error = redact(str(error))
-            if not is_manifest_job(job.kind):
+            if job.kind in CLUSTER_FAILURE_JOB_KINDS:
                 cluster = db.get(Cluster, job.cluster_id)
                 if cluster:
                     cluster.status = ClusterStatus.FAILED

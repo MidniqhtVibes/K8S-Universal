@@ -50,6 +50,7 @@
               server {{ backend.name }} {{ backend.ip }}:{{ api_port }} check
           {% endfor %}
 
+          {% if ingress_enabled %}
           frontend http_ingress
               bind *:80
               mode tcp
@@ -75,6 +76,7 @@
           {% for backend in haproxy_workers %}
               server {{ backend.name }} {{ backend.ip }}:{{ ingress_https_node_port }} check
           {% endfor %}
+          {% endif %}
       notify: Restart HAProxy
 
     - name: Set keepalived state
@@ -83,7 +85,10 @@
 
     - name: Set keepalived priority
       ansible.builtin.set_fact:
-        keepalived_priority: "{{ 110 - (groups['loadbalancer'].index(inventory_hostname) * 10) }}"
+        # Keep enough distance from VRRP's reserved address-owner priority 255.
+        # Adjacent values are intentional: the health-check weight of 2 must
+        # be able to move a healthy backup above an unhealthy current master.
+        keepalived_priority: "{{ 150 - groups['loadbalancer'].index(inventory_hostname) }}"
 
     - name: Configure Keepalived
       ansible.builtin.copy:
@@ -101,7 +106,7 @@
           vrrp_instance VI_1 {
               state {{ keepalived_state }}
               interface {{ keepalived_interface | default('eth0') }}
-              virtual_router_id 51
+              virtual_router_id {{ keepalived_virtual_router_id }}
               priority {{ keepalived_priority }}
               advert_int 1
 

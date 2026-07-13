@@ -6,9 +6,53 @@ Der Cluster Builder ist die Weboberfläche für dieses Repository. Er verwaltet 
 
 - Ubuntu-Orchestrator mit Docker Engine und Docker Compose
 - Netzwerkzugriff vom Orchestrator auf Proxmox und alle VM-IP-Adressen
-- Proxmox Cloud-Init-Template mit Ubuntu, QEMU Guest Agent und funktionierendem Cloud-Init
+- QEMU-Cloud-Init-Template auf dem Zielnode mit Ubuntu, QEMU Guest Agent und funktionierendem Cloud-Init
 - reservierte Node-IP-Adressen und eine freie API-VIP
 - VRRP zwischen den Load-Balancern muss im Netzwerk erlaubt sein
+
+## Einmaliges Proxmox-Host-Setup
+
+`proxmox/create-template.sh` ist Bestandteil des Releases, aber bewusst kein
+CLI-Zugang zur Webanwendung. Es bereitet ausschliesslich die externe
+Proxmox-Voraussetzung vor, aus der Terraform spaeter die VMs klont. Das Skript
+wird niemals von Web, Worker, Docker Compose oder Ansible ausgefuehrt.
+
+Es muss als `root` direkt auf dem Proxmox-Host laufen, der im Wizard als Node
+ausgewaehlt wird:
+
+```bash
+bash proxmox/create-template.sh \
+  --vm-id 9100 \
+  --storage local-lvm \
+  --bridge vmbr0 \
+  --ubuntu-release noble \
+  --install-dependencies
+```
+
+Die VM-ID `9100` ist nur ein Beispiel und kein Default. `--vm-id` ist ein
+Pflichtwert, wird clusterweit auf Kollisionen geprueft und darf anschliessend
+nicht fuer eine Node-VM verwendet werden. `--storage` muss QEMU-Images und eine
+Cloud-Init-Disk aufnehmen koennen; `--bridge` muss auf dem lokalen Node
+existieren. Standardmaessig wird Ubuntu 24.04 (`noble`) verwendet. Ubuntu 22.04
+(`jammy`) ist ebenfalls waehlbar.
+
+Der Ablauf ist absichtlich defensiv:
+
+1. Proxmox-Host, lokaler Node, Storage, Bridge und freie VM-ID pruefen.
+2. Geplante Werte anzeigen und die VM-ID interaktiv bestaetigen.
+3. Das Ubuntu-Image nur per HTTPS laden und gegen `SHA256SUMS` pruefen.
+4. Cloud-Init, OpenSSH, sudo und QEMU Guest Agent im Image vorbereiten.
+5. Systemdisk als `scsi0`, Cloud-Init-Disk und VirtIO-Netz konfigurieren.
+6. Erst nach erneuter Konfigurationspruefung `qm template` ausfuehren.
+
+Es gibt kein `--force` und keinen automatischen Loeschpfad. Scheitert der Lauf
+nach `qm create`, bleibt die unvollstaendige VM zur manuellen Untersuchung
+erhalten. Fehlende Hostwerkzeuge werden nur mit dem ausdruecklichen Schalter
+`--install-dependencies` installiert. Weitere Parameter zeigt
+`bash proxmox/create-template.sh --help`.
+
+Nach der Erstellung muss die Web-Discovery aufgerufen und dort genau das QEMU-
+Template mit der ausgegebenen ID auf demselben Node ausgewaehlt werden.
 
 ## Installation
 
@@ -39,6 +83,8 @@ Danach mit Benutzer `admin` und `INITIAL_ADMIN_PASSWORD` anmelden. Das initiale 
 7. Nur den unveränderten Plan anwenden.
 8. Nach erfolgreichem Aufbau werden Ansible, Calico, optional Traefik und die Clusterprüfung ausgeführt.
 
+Nach einer Änderung der Clusterkonfiguration gelten vorhandene Kubeconfig und Laufzeitstatus nicht mehr als aktuell. Der Builder verlangt dann einen neuen Terraform-Plan und wendet exakt dieses geprüfte Planartefakt an. SSH-Port `22`, Kubernetes-API-Port `6443` und Kubernetes `v1.36` sind die derzeit vollständig unterstützten Werte.
+
 Destroy ist zweistufig. Zuerst wird nach Eingabe des Clusternamens ein Destroy-Plan erzeugt. Erst dieser unveränderte Plan kann danach angewendet werden.
 
 Nach einem erfolgreichen Destroy erhält der Cluster den Status `destroyed`. Erst dann erscheint die zusätzliche Aktion **Cluster endgültig entfernen**. Sie löscht den Builder-Eintrag sowie dessen lokalen Terraform-State, Kubeconfig, generierte Dateien und Jobdaten. Credentials bleiben erhalten.
@@ -51,6 +97,15 @@ erhalten daraus automatisch den ersten zusammenhängenden freien Bereich. Aktive
 Cluster, manuell reservierte IPs/CIDRs und bei ausgewähltem Proxmox-Credential
 bereits vorhandene VM-IDs werden übersprungen. Doppelte Vergaben zwischen vom
 Builder verwalteten Clustern werden zusätzlich beim Speichern abgewiesen.
+
+Vor dem Terraform-Plan und erneut unmittelbar vor dessen Anwendung prüft der
+Worker die Zielumgebung direkt über die Proxmox-API. Fremde Ressourcen mit
+einer angeforderten VM-ID, einem erzeugten VM-Namen oder einer bereits in
+`ipconfigN` beziehungsweise `netN` hinterlegten statischen IPv4-Adresse
+blockieren den Lauf mit einer konkreten Fehlermeldung. Ressourcen, die laut
+Terraform-State demselben Cluster gehören, werden dabei bewusst ausgenommen.
+Manuell innerhalb eines Gastbetriebssystems gesetzte Adressen, die nicht in der
+Proxmox-Konfiguration stehen, bleiben über **Reservierte IPs/CIDRs** abzusichern.
 
 Der Schalter **Clustername im Proxmox-VM-Namen** erzeugt Namen wie
 `produktion-control-01`. Bestehende Cluster behalten ohne aktivierten Schalter
@@ -76,7 +131,7 @@ Jedes Speichern und jeder Lauf erzeugt eine unveränderliche Revision. Frühere 
 
 ## Proxmox-Berechtigungen
 
-Das Token soll nur die für VM-Cloning, VM-Konfiguration, Storage-Abfrage und Ressourcenerkennung benötigten Rechte besitzen. Kein Root-Passwort verwenden. Der genaue Rechteumfang hängt von Proxmox-Version, Pool- und Storage-Struktur ab und muss vor dem ersten echten Plan in der Zielumgebung geprüft werden.
+Das Token soll nur die für VM-Cloning, VM-Konfiguration, Storage-Abfrage und Ressourcenerkennung benötigten Rechte besitzen. Die Kollisionsprüfung muss mit `VM.Audit` die Konfiguration der für das Token sichtbaren QEMU-VMs und LXC-Container lesen können. Kein Root-Passwort verwenden. Der genaue Rechteumfang hängt von Proxmox-Version, Pool- und Storage-Struktur ab und muss vor dem ersten echten Plan in der Zielumgebung geprüft werden.
 
 Tokenformat für den Builder:
 
@@ -92,16 +147,6 @@ Docker-Volumes:
 - `cluster-data`: zentrale Konfigurationen, Terraform-State, Pläne, generierte Dateien, Kubeconfigs und Logs
 
 Für eine vollständige Wiederherstellung werden beide Volumes und der unveränderte `MASTER_KEY` benötigt. Kubeconfigs und Terraform-State sind sensible Daten und müssen verschlüsselt gesichert werden.
-
-## Entwicklerworkflow
-
-Eine öffentliche, secret-freie `cluster.yaml` kann auch ohne Weboberfläche gerendert werden:
-
-```bash
-python3 -m app.cli render --config cluster.yaml --output .runtime --source .
-```
-
-Die Make-Targets `render`, `plan`, `infra`, `ping`, `k8s` und `check` arbeiten anschließend im isolierten `.runtime`-Verzeichnis. Credentials werden dabei weiterhin extern über Umgebungsvariablen und temporäre Dateien erwartet.
 
 ## Grenzen des MVP
 

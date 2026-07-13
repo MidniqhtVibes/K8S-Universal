@@ -10,17 +10,60 @@ Webbasierter Builder fuer HA-Kubernetes-Cluster auf Proxmox. Die Anwendung erzeu
 - Credentials fuer Proxmox API und SSH-Schluesselverwaltung
 - Kubernetes-Web-Konsole fuer sichere `kubectl`-Befehle
 - Anwendungsvorlagen wie `nginx-demo`, `whoami` und `rollout-demo`
-- Manifest-Revisionen, Diff, Apply, Delete und Curl-Testhinweise fuer Ingress
+- Manifest-Revisionen, Diff, Apply, Delete und automatische HTTP-Tests fuer Ingress
 - Job-Recovery nach Worker-Neustart und manuelles Aufraeumen alter Jobs/Revisionen
 
 ## Voraussetzungen
 
 - Docker und Docker Compose
 - Ein erreichbarer Proxmox-Host oder Proxmox-Cluster
-- Ein cloud-init-faehiges VM-Template in Proxmox
+- Ein cloud-init-faehiges QEMU-VM-Template auf dem ausgewaehlten Proxmox-Node
 - Proxmox API Token mit Rechten zum Erstellen und Loeschen von VMs
 - Freie IP-Adressen und VM-IDs fuer Load Balancer, Control Planes und Worker
 - Netzwerkzugriff von Builder/Worker zu Proxmox und von den VMs ins Internet
+
+## Proxmox-Template vorbereiten
+
+Das Release enthaelt mit `proxmox/create-template.sh` ein einmaliges
+Host-Setupwerkzeug. Es wird direkt als `root` auf genau dem Proxmox-Node
+ausgefuehrt, der spaeter im Wizard ausgewaehlt wird. Es laeuft nicht im
+Builder-Container und wird weder von der Webanwendung noch von Ansible
+automatisch gestartet.
+
+Das Skript laedt ein offizielles Ubuntu-Cloud-Image ueber HTTPS, prueft dessen
+SHA-256-Wert, installiert Cloud-Init, SSH und den QEMU Guest Agent und erzeugt
+daraus ein QEMU-Template. Die VM-ID besitzt keinen festen Standardwert und muss
+im gesamten Proxmox-Cluster frei sein. Vorhandene VMs werden nicht
+ueberschrieben.
+
+Das Skript zuerst aus dem geklonten Release auf den Zielnode kopieren:
+
+```bash
+scp proxmox/create-template.sh root@pve-node:/root/create-template.sh
+ssh root@pve-node
+```
+
+Danach auf dem Proxmox-Host ausfuehren. `9100` ist hier nur eine Beispiel-ID:
+
+```bash
+bash /root/create-template.sh \
+  --vm-id 9100 \
+  --storage local-lvm \
+  --bridge vmbr0 \
+  --ubuntu-release noble \
+  --install-dependencies
+```
+
+Ohne `--install-dependencies` veraendert das Skript keine Hostpakete und bricht
+bei fehlenden Werkzeugen mit einer Erklaerung ab. Alle Optionen zeigt:
+
+```bash
+bash /root/create-template.sh --help
+```
+
+Nach erfolgreichem Abschluss in der Weboberflaeche **Proxmox-Ressourcen
+erkennen** ausfuehren und exakt den Zielnode sowie die ausgegebene Template-VM-ID
+auswaehlen. Diese ID darf nicht erneut fuer eine Cluster-VM vergeben werden.
 
 ## Setup
 
@@ -80,6 +123,16 @@ Login mit Benutzer `admin` und dem Wert aus `INITIAL_ADMIN_PASSWORD`.
 7. Falls nur Ansible, Helm oder Verify wiederholt werden sollen, **Ansible erneut ausfuehren** nutzen.
 
 Ein erfolgreicher Cluster endet mit `READY` und sollte in `kubectl get nodes` alle Nodes als `Ready` zeigen.
+Nach einer Konfigurationsaenderung wird ein Cluster wieder zum Entwurf; die alte Kubeconfig wird gesperrt und ein neuer Terraform-Plan mit anschließendem Apply ist erforderlich.
+
+Vor Plan und Apply blockiert der Builder fremde Proxmox-Ressourcen mit
+kollidierenden VM-IDs, erzeugten VM-Namen oder statischen IPv4-Adressen aus
+`ipconfigN`/`netN`. Das Proxmox-Token benötigt dafür zusätzlich Leserechte
+(`VM.Audit`) auf die sichtbaren Gastkonfigurationen. IPs, die nur manuell im
+Gastbetriebssystem gesetzt wurden, müssen unter **Einstellungen** reserviert
+werden, weil sie nicht aus der Proxmox-Konfiguration erkennbar sind.
+
+Der Builder unterstuetzt derzeit Kubernetes `v1.36`, SSH auf Port `22` und den Kubernetes-API-Port `6443`. Diese Werte sind bewusst festgelegt, weil Cloud-Init und kubeadm abweichende Ports nicht konfigurieren.
 
 ## Anwendungen
 
@@ -92,15 +145,9 @@ Typischer Ablauf:
 3. **Serverseitig validieren** ausfuehren.
 4. Optional **Diff anzeigen**.
 5. **Bundle anwenden** starten.
-6. Im Manifest-Joblog den erzeugten Curl-Befehl gegen die VIP ausfuehren.
+6. Im Manifest-Joblog das Ergebnis des automatischen HTTP-Tests gegen die VIP pruefen.
 
-Beispiel:
-
-```powershell
-curl -v -H "Host: whoami.example.local" http://10.200.50.150/
-```
-
-Der Hostname kommt aus dem Ingress der jeweiligen Anwendung. Die IP ist die API-/Ingress-VIP des Clusters.
+Der Hostname kommt aus dem Ingress der jeweiligen Anwendung. Die Anfrage wird vom Worker mit diesem Host-Header direkt an die API-/Ingress-VIP des Clusters gesendet.
 
 **Aus Cluster entfernen** loescht nur die Kubernetes-Ressourcen. **Eintrag loeschen** entfernt danach den Builder-Eintrag der Anwendung.
 

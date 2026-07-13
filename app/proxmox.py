@@ -1,4 +1,4 @@
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -9,7 +9,12 @@ class ProxmoxError(RuntimeError):
 
 class ProxmoxClient:
     def __init__(self, endpoint: str, api_token: str, verify_tls: bool = True) -> None:
-        base = endpoint.rstrip("/") + "/"
+        parsed = urlsplit(endpoint.strip())
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("Proxmox-Endpoint muss eine vollständige HTTPS-URL sein")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Proxmox-Endpoint darf keine Zugangsdaten, Query oder Fragment enthalten")
+        base = endpoint.strip().rstrip("/") + "/"
         self.base_url = urljoin(base, "api2/json/")
         self.client = httpx.Client(
             base_url=self.base_url,
@@ -37,6 +42,18 @@ class ProxmoxClient:
             result["details"][name] = {"bridges": networks, "storages": storages}
         return result
 
+    def guest_config(self, resource: dict) -> dict:
+        """Read one QEMU/LXC config for static-address collision checks."""
+        guest_type = str(resource.get("type", ""))
+        node = str(resource.get("node", ""))
+        vm_id = resource.get("vmid")
+        if guest_type not in {"qemu", "lxc"} or not node or vm_id is None:
+            raise ProxmoxError("Proxmox-Ressource enthaelt keine lesbare Gast-Konfiguration")
+        config = self.get(f"nodes/{node}/{guest_type}/{int(vm_id)}/config")
+        if not isinstance(config, dict):
+            raise ProxmoxError(f"Proxmox-Konfiguration fuer VM-ID {vm_id} ist ungueltig")
+        return config
+
 
 def split_token(value: str) -> tuple[str, str]:
     """Accept the provider format token-id=secret and preserve both pieces."""
@@ -46,4 +63,3 @@ def split_token(value: str) -> tuple[str, str]:
     if "!" not in token_id or not secret:
         raise ValueError("Ungültiges Proxmox-Tokenformat")
     return token_id, secret
-

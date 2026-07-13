@@ -76,6 +76,8 @@ class Cluster(Base):
     config_hash: Mapped[str] = mapped_column(String(64))
     planned_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     destroy_planned_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    applied_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    applied_vm_ids: Mapped[list[int] | None] = mapped_column(JSON, nullable=True, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     jobs: Mapped[list["Job"]] = relationship(back_populates="cluster", cascade="all, delete-orphan")
