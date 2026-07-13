@@ -23,10 +23,15 @@ from .models import AuditEvent, ApplicationBundle, Cluster, ClusterStatus, Crede
 from .kubectl_terminal import audit_safe_command, parse_kubectl_command
 from .proxmox import ProxmoxClient, ProxmoxError, split_token
 from .security import validate_ssh_keypair, verify_password
-from .services import bootstrap_database, build_cluster_from_form, credential_payload, queue_job, save_cluster, store_credential
+from .services import bind_proxmox_credential, bootstrap_database, build_cluster_from_form, credential_payload, queue_job, save_cluster, store_credential
+from .terraform_state import managed_vm_ids
 
 
 settings = get_settings()
+
+
+def cluster_runtime_is_current(cluster: Cluster) -> bool:
+    return cluster.applied_hash is not None and cluster.applied_hash == cluster.config_hash
 
 
 def sidebar_context(_: Request) -> dict:
@@ -130,6 +135,7 @@ def create_proxmox_credential(
     _: User = Depends(current_user), db: Session = Depends(get_db),
 ):
     try:
+        endpoint = endpoint.strip().rstrip("/") + "/"
         split_token(api_token)
         client = ProxmoxClient(endpoint, api_token, verify_tls)
         client.get("version")
@@ -146,9 +152,9 @@ def create_ssh_credential(
 ):
     try:
         validate_ssh_keypair(private_key, public_key)
+        store_credential(db, name=name, kind=CredentialKind.SSH, secret_payload={"private_key": private_key}, public_data={"public_key": public_key.strip()})
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    store_credential(db, name=name, kind=CredentialKind.SSH, secret_payload={"private_key": private_key}, public_data={"public_key": public_key.strip()})
     return RedirectResponse("/credentials", status_code=303)
 
 
@@ -157,7 +163,10 @@ def generate_ssh_credential(name: str = Form(), _: User = Depends(current_user),
     key = Ed25519PrivateKey.generate()
     private_key = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, serialization.NoEncryption()).decode()
     public_key = key.public_key().public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode() + " cluster-builder"
-    store_credential(db, name=name, kind=CredentialKind.SSH, secret_payload={"private_key": private_key}, public_data={"public_key": public_key})
+    try:
+        store_credential(db, name=name, kind=CredentialKind.SSH, secret_payload={"private_key": private_key}, public_data={"public_key": public_key})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return RedirectResponse("/credentials", status_code=303)
 
 
@@ -225,6 +234,7 @@ async def create_cluster(request: Request, _: User = Depends(current_user), db: 
     form_data = await request.form()
     values = {key: str(value) for key, value in form_data.items()}
     try:
+        values = bind_proxmox_credential(db, values)
         config = build_cluster_from_form(values)
         ssh_id = config.ssh.credential_ref.removeprefix("credential://")
         ssh_credential = db.get(Credential, ssh_id)
@@ -232,7 +242,6 @@ async def create_cluster(request: Request, _: User = Depends(current_user), db: 
             raise ValueError("SSH-Credential nicht gefunden")
         if config.ssh.public_key != ssh_credential.public_data.get("public_key"):
             raise ValueError("Public Key passt nicht zum ausgewählten SSH-Credential")
-        credential_payload(db, config.proxmox.credential_ref, CredentialKind.PROXMOX)
         cluster = save_cluster(db, config, settings.data_root, settings.source_root)
     except (ValidationError, ValueError, KeyError) as exc:
         return render_wizard(request, db, str(exc), values, 400)
@@ -248,8 +257,8 @@ def cluster_form_values(cluster: Cluster) -> dict[str, str]:
         "bridge": config["proxmox"]["bridge"], "vlan_id": str(config["proxmox"].get("vlan_id") or ""), "verify_tls": "on" if config["proxmox"]["verify_tls"] else "",
         "vm_name_include_cluster": "on" if config["proxmox"].get("vm_name_include_cluster", False) else "",
         "network_cidr": config["network"]["cidr"], "gateway": config["network"]["gateway"], "dns_servers": ", ".join(config["network"]["dns_servers"]), "api_vip": config["network"]["api_vip"],
-        "pod_cidr": config["kubernetes"]["pod_cidr"], "service_cidr": config["kubernetes"]["service_cidr"], "kubernetes_version": config["kubernetes"]["version"], "api_port": str(config["kubernetes"]["api_port"]),
-        "ssh_credential": config["ssh"]["credential_ref"], "ssh_user": config["ssh"]["user"], "ssh_port": str(config["ssh"]["port"]), "ssh_public_key": config["ssh"]["public_key"],
+        "pod_cidr": config["kubernetes"]["pod_cidr"], "service_cidr": config["kubernetes"]["service_cidr"], "kubernetes_version": config["kubernetes"]["version"],
+        "ssh_credential": config["ssh"]["credential_ref"], "ssh_user": config["ssh"]["user"], "ssh_public_key": config["ssh"]["public_key"],
         "calico_version": config["addons"]["cni"]["version"], "ingress_enabled": "on" if config["addons"]["ingress"]["enabled"] else "", "traefik_replicas": str(config["addons"]["ingress"]["replicas"]),
         "http_node_port": str(config["addons"]["ingress"]["http_node_port"]), "https_node_port": str(config["addons"]["ingress"]["https_node_port"]),
     }
@@ -340,11 +349,11 @@ async def update_cluster(cluster_id: str, request: Request, _: User = Depends(cu
     form_data = await request.form()
     values = {key: str(value) for key, value in form_data.items()}
     try:
+        values = bind_proxmox_credential(db, values)
         config = build_cluster_from_form(values, cluster_id)
         ssh_credential = db.get(Credential, config.ssh.credential_ref.removeprefix("credential://"))
         if not ssh_credential or ssh_credential.kind != CredentialKind.SSH or config.ssh.public_key != ssh_credential.public_data.get("public_key"):
             raise ValueError("SSH-Credential und Public Key passen nicht zusammen")
-        credential_payload(db, config.proxmox.credential_ref, CredentialKind.PROXMOX)
         save_cluster(db, config, settings.data_root, settings.source_root)
     except (ValidationError, ValueError, KeyError) as exc:
         return render_wizard(request, db, str(exc), values, 400)
@@ -358,8 +367,9 @@ def cluster_detail(cluster_id: str, request: Request, _: User = Depends(current_
         raise HTTPException(404)
     jobs = db.scalars(select(Job).where(Job.cluster_id == cluster.id).order_by(Job.created_at.desc())).all()
     workspace = settings.data_root / "clusters" / cluster.id
-    kubeconfig_available = (workspace / "kubeconfig").is_file()
-    terraform_state_available = (workspace / "terraform" / "terraform.tfstate").is_file()
+    runtime_current = cluster_runtime_is_current(cluster)
+    kubeconfig_available = runtime_current and (workspace / "kubeconfig").is_file()
+    terraform_state_available = runtime_current and (workspace / "terraform" / "terraform.tfstate").is_file()
     return templates.TemplateResponse(request, "cluster.html", {
         "cluster": cluster,
         "jobs": jobs,
@@ -373,7 +383,7 @@ def cluster_terminal(cluster_id: str, request: Request, _: User = Depends(curren
     cluster = db.get(Cluster, cluster_id)
     if not cluster:
         raise HTTPException(404)
-    kubeconfig_available = (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file()
+    kubeconfig_available = cluster_runtime_is_current(cluster) and (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file()
     return templates.TemplateResponse(request, "terminal.html", {"cluster": cluster, "kubeconfig_available": kubeconfig_available})
 
 
@@ -399,7 +409,13 @@ def create_application(
     normalized = name.strip().lower()
     if not cluster:
         raise HTTPException(404)
-    if not normalized or len(normalized) > 63 or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in normalized):
+    if (
+        not normalized
+        or len(normalized) > 63
+        or normalized[0] == "-"
+        or normalized[-1] == "-"
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in normalized)
+    ):
         raise HTTPException(400, "Anwendungsname darf nur Kleinbuchstaben, Zahlen und Bindestriche enthalten")
     if db.scalar(select(ApplicationBundle).where(ApplicationBundle.cluster_id == cluster_id, ApplicationBundle.name == normalized)):
         raise HTTPException(409, "Eine Anwendung mit diesem Namen existiert bereits")
@@ -431,7 +447,7 @@ def application_editor(cluster_id: str, bundle_id: str, request: Request, _: Use
     revisions = db.scalars(select(ManifestRevision).where(ManifestRevision.bundle_id == bundle.id).order_by(ManifestRevision.version.desc()).limit(15)).all()
     cluster_jobs = db.scalars(select(Job).where(Job.cluster_id == cluster_id).order_by(Job.created_at.desc()).limit(50)).all()
     jobs = [job for job in cluster_jobs if job.payload.get("bundle_id") == bundle.id][:10]
-    kubeconfig_available = (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file()
+    kubeconfig_available = cluster_runtime_is_current(cluster) and (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file()
     return templates.TemplateResponse(request, "application_editor.html", {"cluster": cluster, "bundle": bundle, "files": files, "selected": selected, "revisions": revisions, "jobs": jobs, "kubeconfig_available": kubeconfig_available})
 
 
@@ -549,7 +565,7 @@ def start_manifest_job(
     bundle = db.get(ApplicationBundle, bundle_id)
     if not cluster or not bundle or bundle.cluster_id != cluster_id:
         raise HTTPException(404)
-    if not (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file():
+    if not cluster_runtime_is_current(cluster) or not (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file():
         raise HTTPException(409, "Anwendungsjobs sind erst nach erfolgreichem Cluster-Apply möglich")
     kinds = {"validate": JobKind.MANIFEST_VALIDATE, "diff": JobKind.MANIFEST_DIFF, "apply": JobKind.MANIFEST_APPLY, "delete": JobKind.MANIFEST_DELETE}
     if action not in kinds:
@@ -602,7 +618,7 @@ async def kubectl_websocket(websocket: WebSocket, cluster_id: str):
         user = db.get(User, user_id)
         cluster = db.get(Cluster, cluster_id)
     kubeconfig = settings.data_root / "clusters" / cluster_id / "kubeconfig"
-    if not user or not user.enabled or not cluster or not kubeconfig.is_file():
+    if not user or not user.enabled or not cluster or not cluster_runtime_is_current(cluster) or not kubeconfig.is_file():
         await websocket.close(code=4404)
         return
     await websocket.accept()
@@ -688,9 +704,15 @@ def start_job(cluster_id: str, kind: JobKind, destroy_confirmation: str = Form("
         raise HTTPException(404)
     if kind in (JobKind.DESTROY_PLAN, JobKind.DESTROY) and destroy_confirmation != cluster.name:
         raise HTTPException(400, "Zur Bestätigung muss der Clustername eingegeben werden")
-    if kind == JobKind.VERIFY and not (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file():
+    if kind == JobKind.VERIFY and (
+        not cluster_runtime_is_current(cluster)
+        or not (settings.data_root / "clusters" / cluster.id / "kubeconfig").is_file()
+    ):
         raise HTTPException(409, "Clusterprüfung ist erst nach einem erfolgreichen Apply mit erzeugter Kubeconfig möglich")
-    if kind == JobKind.ANSIBLE and not (settings.data_root / "clusters" / cluster.id / "terraform" / "terraform.tfstate").is_file():
+    if kind == JobKind.ANSIBLE and (
+        not cluster_runtime_is_current(cluster)
+        or not (settings.data_root / "clusters" / cluster.id / "terraform" / "terraform.tfstate").is_file()
+    ):
         raise HTTPException(409, "Ansible kann erst erneut ausgefuehrt werden, wenn Terraform bereits VMs angelegt hat")
     try:
         queue_job(db, cluster, kind)
@@ -733,6 +755,8 @@ def cancel_job(job_id: str, _: User = Depends(current_user), db: Session = Depen
         raise HTTPException(404)
     if job.status == JobStatus.QUEUED:
         job.status = JobStatus.CANCELLED
+        job.finished_at = utcnow()
+        job.heartbeat_at = job.finished_at
     elif job.status == JobStatus.RUNNING:
         job.cancel_requested = True
     db.commit()
@@ -748,8 +772,12 @@ def present_cluster_vm_ids(db: Session, cluster: Cluster) -> list[int]:
         bool(proxmox_config.get("verify_tls", True)),
     ).discover()
     existing_ids = {int(vm["vmid"]) for vm in discovery.get("vms", []) if vm.get("vmid") is not None}
-    cluster_ids = {int(node["vm_id"]) for node in cluster.config.get("nodes", [])}
-    return sorted(cluster_ids & existing_ids)
+    configured_ids = {int(node["vm_id"]) for node in cluster.config.get("nodes", [])}
+    applied_ids = {int(vm_id) for vm_id in (cluster.applied_vm_ids or [])}
+    state_path = settings.data_root / "clusters" / cluster.id / "terraform" / "terraform.tfstate"
+    state_ids = managed_vm_ids(state_path)
+    owned_ids = configured_ids | applied_ids | state_ids
+    return sorted(owned_ids & existing_ids)
 
 
 @app.post("/clusters/{cluster_id}/delete")

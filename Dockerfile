@@ -2,7 +2,7 @@
 
 ARG PYTHON_VERSION=3.12
 ARG TERRAFORM_VERSION=1.12.2
-ARG KUBECTL_VERSION=v1.33.2
+ARG KUBECTL_VERSION=v1.36.2
 ARG HELM_VERSION=v3.18.3
 
 FROM debian:bookworm-slim AS external-tools
@@ -113,7 +113,3 @@ RUN python -m pip uninstall -y pip \
     && find "$VIRTUAL_ENV" -type f -name "*.pyc" -delete
 
 CMD ["python", "-m", "app.worker"]
-
-FROM worker AS standalone
-EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

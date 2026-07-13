@@ -5,15 +5,6 @@
   become: true
   any_errors_fatal: true
   tasks:
-    - name: Wait for cloud-init to finish
-      ansible.builtin.command: timeout 900 cloud-init status --wait --long
-      register: cloud_init_status
-      changed_when: false
-      failed_when: >-
-        cloud_init_status.rc not in [0, 2]
-        or 'status: done' not in cloud_init_status.stdout
-        or 'errors: []' not in cloud_init_status.stdout
-
     - name: Wait for apt and dpkg locks to become available
       ansible.builtin.shell: |
         set -o pipefail

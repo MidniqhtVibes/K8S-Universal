@@ -1,5 +1,6 @@
 from ipaddress import IPv4Address, IPv4Network
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -14,6 +15,17 @@ class ProxmoxConfig(BaseModel):
     verify_tls: bool = True
     vm_name_include_cluster: bool = False
     credential_ref: str
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        endpoint = value.strip()
+        parsed = urlsplit(endpoint)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("Proxmox-Endpoint muss eine vollständige HTTPS-URL sein")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Proxmox-Endpoint darf keine Zugangsdaten, Query oder Fragment enthalten")
+        return endpoint.rstrip("/") + "/"
 
 
 class NetworkConfig(BaseModel):
@@ -30,7 +42,8 @@ class NetworkConfig(BaseModel):
 
 class SSHConfig(BaseModel):
     user: str = "ubuntu"
-    port: int = Field(default=22, ge=1, le=65535)
+    # Proxmox cloud-init leaves the image's SSH daemon on its standard port.
+    port: Literal[22] = 22
     public_key: str
     credential_ref: str
 
@@ -43,8 +56,9 @@ class SSHConfig(BaseModel):
 
 
 class KubernetesConfig(BaseModel):
-    version: str = "v1.36"
-    api_port: int = Field(default=6443, ge=1, le=65535)
+    # The worker kubectl and package repository support this pinned minor.
+    version: Literal["v1.36"] = "v1.36"
+    api_port: Literal[6443] = 6443
     pod_cidr: IPv4Network
     service_cidr: IPv4Network
 
@@ -52,6 +66,13 @@ class KubernetesConfig(BaseModel):
     @classmethod
     def parse_network(cls, value: object) -> IPv4Network:
         return IPv4Network(str(value), strict=True)
+
+    @field_validator("pod_cidr")
+    @classmethod
+    def validate_pod_cidr_capacity(cls, value: IPv4Network) -> IPv4Network:
+        if value.prefixlen > 29:
+            raise ValueError("Pod-CIDR muss mindestens acht IPv4-Adressen enthalten")
+        return value
 
 
 class NodeConfig(BaseModel):
@@ -66,7 +87,7 @@ class NodeConfig(BaseModel):
 
 class CNIConfig(BaseModel):
     provider: Literal["calico"] = "calico"
-    version: str = "v3.32.0"
+    version: str = Field(default="v3.32.0", pattern=r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 class IngressConfig(BaseModel):
@@ -75,6 +96,7 @@ class IngressConfig(BaseModel):
     replicas: int = Field(default=2, ge=1)
     http_node_port: int = Field(default=30080, ge=30000, le=32767)
     https_node_port: int = Field(default=30443, ge=30000, le=32767)
+    chart_version: str = Field(default="40.2.0", pattern=r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 class AddonsConfig(BaseModel):
@@ -113,6 +135,12 @@ class ClusterConfig(BaseModel):
                 raise ValueError(f"{address} ist eine reservierte Netzadresse")
         if self.network.api_vip in ips:
             raise ValueError("API-VIP darf keinem Node gehören")
+        if self.network.gateway == self.network.api_vip:
+            raise ValueError("Gateway und API-VIP müssen verschieden sein")
+        if self.network.gateway in ips:
+            raise ValueError("Gateway darf keinem Node gehören")
+        if self.proxmox.template_vm_id in vm_ids:
+            raise ValueError("Template-VM-ID darf nicht als Node-VM-ID verwendet werden")
         networks = [self.network.cidr, self.kubernetes.pod_cidr, self.kubernetes.service_cidr]
         for index, left in enumerate(networks):
             for right in networks[index + 1 :]:
@@ -121,6 +149,8 @@ class ClusterConfig(BaseModel):
         roles = [node.role for node in self.nodes]
         if roles.count("loadbalancer") < 2:
             raise ValueError("HA benötigt mindestens zwei Load Balancer")
+        if roles.count("loadbalancer") > 10:
+            raise ValueError("Höchstens zehn Load Balancer werden unterstützt")
         if roles.count("control_plane") not in (3, 5, 7):
             raise ValueError("Control Plane benötigt eine ungerade Anzahl von 3, 5 oder 7 Nodes")
         if roles.count("worker") < 1:

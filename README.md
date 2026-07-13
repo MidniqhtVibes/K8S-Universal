@@ -10,14 +10,14 @@ Webbasierter Builder fuer HA-Kubernetes-Cluster auf Proxmox. Die Anwendung erzeu
 - Credentials fuer Proxmox API und SSH-Schluesselverwaltung
 - Kubernetes-Web-Konsole fuer sichere `kubectl`-Befehle
 - Anwendungsvorlagen wie `nginx-demo`, `whoami` und `rollout-demo`
-- Manifest-Revisionen, Diff, Apply, Delete und Curl-Testhinweise fuer Ingress
+- Manifest-Revisionen, Diff, Apply, Delete und automatische HTTP-Tests fuer Ingress
 - Job-Recovery nach Worker-Neustart und manuelles Aufraeumen alter Jobs/Revisionen
 
 ## Voraussetzungen
 
 - Docker und Docker Compose
 - Ein erreichbarer Proxmox-Host oder Proxmox-Cluster
-- Ein cloud-init-faehiges VM-Template in Proxmox
+- Ein cloud-init-faehiges QEMU-VM-Template auf dem ausgewaehlten Proxmox-Node
 - Proxmox API Token mit Rechten zum Erstellen und Loeschen von VMs
 - Freie IP-Adressen und VM-IDs fuer Load Balancer, Control Planes und Worker
 - Netzwerkzugriff von Builder/Worker zu Proxmox und von den VMs ins Internet
@@ -80,6 +80,9 @@ Login mit Benutzer `admin` und dem Wert aus `INITIAL_ADMIN_PASSWORD`.
 7. Falls nur Ansible, Helm oder Verify wiederholt werden sollen, **Ansible erneut ausfuehren** nutzen.
 
 Ein erfolgreicher Cluster endet mit `READY` und sollte in `kubectl get nodes` alle Nodes als `Ready` zeigen.
+Nach einer Konfigurationsaenderung wird ein Cluster wieder zum Entwurf; die alte Kubeconfig wird gesperrt und ein neuer Terraform-Plan mit anschließendem Apply ist erforderlich.
+
+Der Builder unterstuetzt derzeit Kubernetes `v1.36`, SSH auf Port `22` und den Kubernetes-API-Port `6443`. Diese Werte sind bewusst festgelegt, weil Cloud-Init und kubeadm abweichende Ports nicht konfigurieren.
 
 ## Anwendungen
 
@@ -92,15 +95,9 @@ Typischer Ablauf:
 3. **Serverseitig validieren** ausfuehren.
 4. Optional **Diff anzeigen**.
 5. **Bundle anwenden** starten.
-6. Im Manifest-Joblog den erzeugten Curl-Befehl gegen die VIP ausfuehren.
+6. Im Manifest-Joblog das Ergebnis des automatischen HTTP-Tests gegen die VIP pruefen.
 
-Beispiel:
-
-```powershell
-curl -v -H "Host: whoami.example.local" http://10.200.50.150/
-```
-
-Der Hostname kommt aus dem Ingress der jeweiligen Anwendung. Die IP ist die API-/Ingress-VIP des Clusters.
+Der Hostname kommt aus dem Ingress der jeweiligen Anwendung. Die Anfrage wird vom Worker mit diesem Host-Header direkt an die API-/Ingress-VIP des Clusters gesendet.
 
 **Aus Cluster entfernen** loescht nur die Kubernetes-Ressourcen. **Eintrag loeschen** entfernt danach den Builder-Eintrag der Anwendung.
 

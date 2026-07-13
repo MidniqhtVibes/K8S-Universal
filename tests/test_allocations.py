@@ -22,3 +22,10 @@ def test_reserved_ranges_are_parsed_and_bounded():
 def test_default_preferences_are_valid():
     validated = validate_preference_config({})
     assert validated["cp_count"] == 3
+
+
+def test_preference_pools_reject_gateway_and_overlaps():
+    with pytest.raises(ValueError, match="Gateway"):
+        validate_preference_config({"vip_pool_start": "10.200.50.1", "vip_pool_end": "10.200.50.4"})
+    with pytest.raises(ValueError, match="überschneiden"):
+        validate_preference_config({"lb_ip_start": "10.200.50.143"})

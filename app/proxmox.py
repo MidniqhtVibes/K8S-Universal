@@ -1,4 +1,4 @@
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -9,7 +9,12 @@ class ProxmoxError(RuntimeError):
 
 class ProxmoxClient:
     def __init__(self, endpoint: str, api_token: str, verify_tls: bool = True) -> None:
-        base = endpoint.rstrip("/") + "/"
+        parsed = urlsplit(endpoint.strip())
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("Proxmox-Endpoint muss eine vollständige HTTPS-URL sein")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Proxmox-Endpoint darf keine Zugangsdaten, Query oder Fragment enthalten")
+        base = endpoint.strip().rstrip("/") + "/"
         self.base_url = urljoin(base, "api2/json/")
         self.client = httpx.Client(
             base_url=self.base_url,
@@ -46,4 +51,3 @@ def split_token(value: str) -> tuple[str, str]:
     if "!" not in token_id or not secret:
         raise ValueError("Ungültiges Proxmox-Tokenformat")
     return token_id, secret
-

@@ -93,7 +93,7 @@
           spec:
             calicoNetwork:
               ipPools:
-                - blockSize: 26
+                - blockSize: {{ calico_block_size }}
                   cidr: {{ pod_cidr }}
                   encapsulation: VXLANCrossSubnet
                   natOutgoing: Enabled

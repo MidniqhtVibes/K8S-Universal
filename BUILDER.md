@@ -6,7 +6,7 @@ Der Cluster Builder ist die Weboberfläche für dieses Repository. Er verwaltet 
 
 - Ubuntu-Orchestrator mit Docker Engine und Docker Compose
 - Netzwerkzugriff vom Orchestrator auf Proxmox und alle VM-IP-Adressen
-- Proxmox Cloud-Init-Template mit Ubuntu, QEMU Guest Agent und funktionierendem Cloud-Init
+- QEMU-Cloud-Init-Template auf dem Zielnode mit Ubuntu, QEMU Guest Agent und funktionierendem Cloud-Init
 - reservierte Node-IP-Adressen und eine freie API-VIP
 - VRRP zwischen den Load-Balancern muss im Netzwerk erlaubt sein
 
@@ -38,6 +38,8 @@ Danach mit Benutzer `admin` und `INITIAL_ADMIN_PASSWORD` anmelden. Das initiale 
 6. Einen Terraform-Plan erzeugen und im Joblog kontrollieren.
 7. Nur den unveränderten Plan anwenden.
 8. Nach erfolgreichem Aufbau werden Ansible, Calico, optional Traefik und die Clusterprüfung ausgeführt.
+
+Nach einer Änderung der Clusterkonfiguration gelten vorhandene Kubeconfig und Laufzeitstatus nicht mehr als aktuell. Der Builder verlangt dann einen neuen Terraform-Plan und wendet exakt dieses geprüfte Planartefakt an. SSH-Port `22`, Kubernetes-API-Port `6443` und Kubernetes `v1.36` sind die derzeit vollständig unterstützten Werte.
 
 Destroy ist zweistufig. Zuerst wird nach Eingabe des Clusternamens ein Destroy-Plan erzeugt. Erst dieser unveränderte Plan kann danach angewendet werden.
 
@@ -92,16 +94,6 @@ Docker-Volumes:
 - `cluster-data`: zentrale Konfigurationen, Terraform-State, Pläne, generierte Dateien, Kubeconfigs und Logs
 
 Für eine vollständige Wiederherstellung werden beide Volumes und der unveränderte `MASTER_KEY` benötigt. Kubeconfigs und Terraform-State sind sensible Daten und müssen verschlüsselt gesichert werden.
-
-## Entwicklerworkflow
-
-Eine öffentliche, secret-freie `cluster.yaml` kann auch ohne Weboberfläche gerendert werden:
-
-```bash
-python3 -m app.cli render --config cluster.yaml --output .runtime --source .
-```
-
-Die Make-Targets `render`, `plan`, `infra`, `ping`, `k8s` und `check` arbeiten anschließend im isolierten `.runtime`-Verzeichnis. Credentials werden dabei weiterhin extern über Umgebungsvariablen und temporäre Dateien erwartet.
 
 ## Grenzen des MVP
 
