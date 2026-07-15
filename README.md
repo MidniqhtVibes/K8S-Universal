@@ -1,49 +1,59 @@
 # Proxmox Kubernetes Cluster Builder
 
-Webbasierter Builder fuer HA-Kubernetes-Cluster auf Proxmox. Die Anwendung erzeugt aus einem Wizard Terraform- und Ansible-Konfigurationen, erstellt die Proxmox-VMs, installiert Kubernetes, Calico und optional Traefik, und verwaltet einfache Kubernetes-Anwendungen als Manifest-Bundles.
+Webbasierter Builder für HA-Kubernetes-Cluster auf Proxmox. Die Anwendung erzeugt aus einem Wizard Terraform- und Ansible-Konfigurationen, erstellt die Proxmox-VMs und installiert Kubernetes, Calico und optional Traefik.
+
+Die Anwendung wird als fertige Container-Images über die GitHub Container Registry (GHCR) bereitgestellt. Für den normalen Betrieb müssen die Images daher nicht lokal gebaut werden. Installationsabhängige Werte wie Passwörter, Secrets, Ports und Laufzeiteinstellungen werden über eine eigene `.env` konfiguriert.
 
 ## Funktionen
 
 - Proxmox-Cluster-Erzeugung mit Load Balancern, Control Planes und Workern
-- Terraform Plan, Apply, Destroy Plan und Destroy ueber die Weboberflaeche
-- Ansible/Helm/Verify erneut ausfuehrbar, ohne Terraform erneut zu starten
-- Credentials fuer Proxmox API und SSH-Schluesselverwaltung
-- Kubernetes-Web-Konsole fuer sichere `kubectl`-Befehle
-- Anwendungsvorlagen wie `nginx-demo`, `whoami` und `rollout-demo`
-- Manifest-Revisionen, Diff, Apply, Delete und automatische HTTP-Tests fuer Ingress
-- Job-Recovery nach Worker-Neustart und manuelles Aufraeumen alter Jobs/Revisionen
+- Terraform Plan, Apply, Destroy Plan und Destroy über die Weboberfläche
+- Provisionierung über Terraform, Ansible und kubeadm
+- HAProxy und Keepalived für die Kubernetes-API-VIP
+- Calico als CNI und optional Traefik als Ingress Controller
+- Credentials für Proxmox API und SSH-Schlüsselverwaltung
+- Kubernetes-Web-Konsole für `kubectl`
+- Anwendungsvorlagen und Manifest-Bundles
+- Job-Recovery nach Worker-Neustart
+- Fertige Web- und Worker-Images über GHCR
+- Versionsbasierte Updates über `BUILDER_VERSION`
 
 ## Voraussetzungen
 
+Für den Betrieb:
+
 - Docker und Docker Compose
 - Ein erreichbarer Proxmox-Host oder Proxmox-Cluster
-- Ein cloud-init-faehiges QEMU-VM-Template auf dem ausgewaehlten Proxmox-Node
-- Proxmox API Token mit Rechten zum Erstellen und Loeschen von VMs
-- Freie IP-Adressen und VM-IDs fuer Load Balancer, Control Planes und Worker
-- Netzwerkzugriff von Builder/Worker zu Proxmox und von den VMs ins Internet
+- Ein cloud-init-fähiges QEMU-VM-Template auf dem ausgewählten Proxmox-Node
+- Proxmox API Token mit Rechten zum Erstellen, Lesen und Löschen von VMs
+- Freie IP-Adressen und VM-IDs für Load Balancer, Control Planes und Worker
+- Netzwerkzugriff vom Builder/Worker zu Proxmox
+- Netzwerkzugriff der erzeugten VMs ins Internet
+- Zugriff auf `ghcr.io`, sofern die Images direkt aus der GitHub Container Registry bezogen werden
+
+Für die lokale Entwicklung zusätzlich:
+
+- Git
+- Ein Checkout des vollständigen Repositories
 
 ## Proxmox-Template vorbereiten
 
-Das Release enthaelt mit `proxmox/create-template.sh` ein einmaliges
-Host-Setupwerkzeug. Es wird direkt als `root` auf genau dem Proxmox-Node
-ausgefuehrt, der spaeter im Wizard ausgewaehlt wird. Es laeuft nicht im
-Builder-Container und wird weder von der Webanwendung noch von Ansible
-automatisch gestartet.
+Das Repository enthält mit `proxmox/create-template.sh` ein einmaliges Host-Setupwerkzeug. Es wird direkt als `root` auf genau dem Proxmox-Node ausgeführt, der später im Wizard ausgewählt wird.
 
-Das Skript laedt ein offizielles Ubuntu-Cloud-Image ueber HTTPS, prueft dessen
-SHA-256-Wert, installiert Cloud-Init, SSH und den QEMU Guest Agent und erzeugt
-daraus ein QEMU-Template. Die VM-ID besitzt keinen festen Standardwert und muss
-im gesamten Proxmox-Cluster frei sein. Vorhandene VMs werden nicht
-ueberschrieben.
+Das Skript läuft nicht im Builder-Container und wird weder von der Webanwendung noch von Ansible automatisch gestartet.
 
-Das Skript zuerst aus dem geklonten Release auf den Zielnode kopieren:
+Es lädt ein offizielles Ubuntu-Cloud-Image über HTTPS, prüft dessen SHA-256-Wert, installiert Cloud-Init, SSH und den QEMU Guest Agent und erzeugt daraus ein QEMU-Template.
+
+Die VM-ID besitzt keinen festen Standardwert und muss im gesamten Proxmox-Cluster frei sein. Vorhandene VMs werden nicht überschrieben.
+
+Das Skript zuerst aus dem Repository auf den Zielnode kopieren:
 
 ```bash
 scp proxmox/create-template.sh root@pve-node:/root/create-template.sh
 ssh root@pve-node
 ```
 
-Danach auf dem Proxmox-Host ausfuehren. `9100` ist hier nur eine Beispiel-ID:
+Danach auf dem Proxmox-Host ausführen. `9100` ist hier nur eine Beispiel-ID:
 
 ```bash
 bash /root/create-template.sh \
@@ -54,141 +64,330 @@ bash /root/create-template.sh \
   --install-dependencies
 ```
 
-Ohne `--install-dependencies` veraendert das Skript keine Hostpakete und bricht
-bei fehlenden Werkzeugen mit einer Erklaerung ab. Alle Optionen zeigt:
+Ohne `--install-dependencies` verändert das Skript keine Hostpakete und bricht bei fehlenden Werkzeugen mit einer Erklärung ab.
+
+Alle Optionen zeigt:
 
 ```bash
 bash /root/create-template.sh --help
 ```
 
-Nach erfolgreichem Abschluss in der Weboberflaeche **Proxmox-Ressourcen
-erkennen** ausfuehren und exakt den Zielnode sowie die ausgegebene Template-VM-ID
-auswaehlen. Diese ID darf nicht erneut fuer eine Cluster-VM vergeben werden.
+Nach erfolgreichem Abschluss kann das Template später im Builder ausgewählt werden.
 
-## Setup
+## Setup mit fertigen Container-Images
 
-1. Repository klonen oder aktualisieren:
+Für den normalen Betrieb werden die Images nicht mehr lokal gebaut.
 
-```powershell
-git pull
+Benötigt werden:
+
+```text
+compose.yaml
+.env
 ```
 
-2. `.env` aus der Vorlage erzeugen und Werte anpassen:
+Als Vorlage für die Konfiguration dient `.env.example`.
+
+### 1. `.env` erstellen
+
+Unter Linux:
+
+```bash
+cp .env.example .env
+chmod 600 .env
+```
+
+Unter PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Wichtige Werte:
+Danach die Werte in `.env` anpassen.
+
+Beispiel:
 
 ```env
-POSTGRES_PASSWORD=...
-MASTER_KEY=...
-SESSION_SECRET=...
-INITIAL_ADMIN_PASSWORD=...
+COMPOSE_PROJECT_NAME=k8s-universal
+
+BUILDER_VERSION=1.0.0
+
+BUILDER_WEB_IMAGE=ghcr.io/midniqhtvibes/k8s-universal-web
+BUILDER_WORKER_IMAGE=ghcr.io/midniqhtvibes/k8s-universal-worker
+
+POSTGRES_PASSWORD=replace-with-a-long-random-url-safe-password
+MASTER_KEY=replace-with-at-least-32-random-characters
+SESSION_SECRET=replace-with-an-independent-long-random-value
+INITIAL_ADMIN_PASSWORD=replace-on-first-start
+
 BUILDER_BIND_ADDRESS=127.0.0.1
 BUILDER_PORT=8000
+SESSION_HTTPS_ONLY=false
+
+TERRAFORM_PARALLELISM=2
+ANSIBLE_FORKS=4
+
+STALE_JOB_TIMEOUT_MINUTES=60
+JOB_RETENTION_KEEP=100
+MANIFEST_REVISION_RETENTION_KEEP=30
 ```
 
-`MASTER_KEY` muss dauerhaft gleich bleiben, sonst koennen gespeicherte Credentials nicht mehr entschluesselt werden.
+`MASTER_KEY` muss dauerhaft gleich bleiben. Wird der Wert geändert oder verloren, können gespeicherte verschlüsselte Credentials nicht mehr entschlüsselt werden.
 
-3. Stack bauen und starten:
+Für `POSTGRES_PASSWORD` wird aktuell ein URL-sicherer Wert empfohlen, da das Passwort in der `DATABASE_URL` verwendet wird.
 
-```powershell
-docker compose up -d --build
+Zum Beispiel:
+
+```bash
+openssl rand -hex 32
 ```
 
-4. Logs pruefen:
+### 2. Container-Images auswählen
 
-```powershell
+Die Images werden standardmäßig aus GHCR geladen:
+
+```text
+ghcr.io/midniqhtvibes/k8s-universal-web
+ghcr.io/midniqhtvibes/k8s-universal-worker
+```
+
+Die gewünschte Version wird über `BUILDER_VERSION` festgelegt.
+
+Für eine feste Release-Version:
+
+```env
+BUILDER_VERSION=1.0.0
+```
+
+Für Tests des aktuellen `main`-Standes:
+
+```env
+BUILDER_VERSION=edge
+```
+
+`latest` verweist auf das zuletzt veröffentlichte Release.
+
+Für produktive Installationen wird eine feste Versionsnummer empfohlen.
+
+### 3. Images herunterladen
+
+```bash
+docker compose pull
+```
+
+Falls die GHCR-Packages privat sind, muss sich der Docker-Host vorher anmelden:
+
+```bash
+echo "$CR_PAT" | docker login ghcr.io -u MidniqhtVibes --password-stdin
+```
+
+Bei öffentlichen Images ist kein Login erforderlich.
+
+### 4. Stack starten
+
+```bash
+docker compose up -d
+```
+
+Status prüfen:
+
+```bash
+docker compose ps
+```
+
+Logs prüfen:
+
+```bash
 docker compose logs -f web worker
 ```
 
-5. Weboberflaeche oeffnen:
+Die Weboberfläche ist standardmäßig erreichbar unter:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Login mit Benutzer `admin` und dem Wert aus `INITIAL_ADMIN_PASSWORD`.
+Der initiale Login erfolgt mit dem Benutzer `admin` und dem Wert aus `INITIAL_ADMIN_PASSWORD`.
 
-## Nutzung
+## Persistente Daten
 
-1. Unter **Credentials** ein Proxmox-Credential anlegen.
-2. Unter **Credentials** ein SSH-Credential erzeugen oder hinterlegen.
-3. Unter **Neuer Cluster** Proxmox, Netzwerk, Kubernetes und Node-Groessen eintragen.
-4. Auf der Cluster-Seite zuerst **Terraform planen** ausfuehren.
-5. Danach **Geprueften Plan anwenden** starten.
-6. Nach erfolgreichem Apply kann mit **Cluster pruefen** validiert werden.
-7. Falls nur Ansible, Helm oder Verify wiederholt werden sollen, **Ansible erneut ausfuehren** nutzen.
+Der Stack verwendet zwei Docker-Volumes:
 
-Ein erfolgreicher Cluster endet mit `READY` und sollte in `kubectl get nodes` alle Nodes als `Ready` zeigen.
-Nach einer Konfigurationsaenderung wird ein Cluster wieder zum Entwurf; die alte Kubeconfig wird gesperrt und ein neuer Terraform-Plan mit anschließendem Apply ist erforderlich.
+```text
+postgres-data
+cluster-data
+```
 
-Vor Plan und Apply blockiert der Builder fremde Proxmox-Ressourcen mit
-kollidierenden VM-IDs, erzeugten VM-Namen oder statischen IPv4-Adressen aus
-`ipconfigN`/`netN`. Das Proxmox-Token benötigt dafür zusätzlich Leserechte
-(`VM.Audit`) auf die sichtbaren Gastkonfigurationen. IPs, die nur manuell im
-Gastbetriebssystem gesetzt wurden, müssen unter **Einstellungen** reserviert
-werden, weil sie nicht aus der Proxmox-Konfiguration erkennbar sind.
+`postgres-data` enthält die PostgreSQL-Datenbank.
 
-Der Builder unterstuetzt derzeit Kubernetes `v1.36`, SSH auf Port `22` und den Kubernetes-API-Port `6443`. Diese Werte sind bewusst festgelegt, weil Cloud-Init und kubeadm abweichende Ports nicht konfigurieren.
+`cluster-data` enthält installationsabhängige Arbeitsdaten des Builders, darunter Cluster-Workspaces und generierte Dateien.
 
-## Anwendungen
+Die Volumes bleiben bei einem normalen Container-Update bestehen.
 
-Unter **Anwendungen** koennen Manifest-Bundles erstellt, bearbeitet und geloescht werden.
-
-Typischer Ablauf:
-
-1. Anwendung aus Template erstellen, zum Beispiel `whoami`.
-2. Manifest speichern oder direkt validieren.
-3. **Serverseitig validieren** ausfuehren.
-4. Optional **Diff anzeigen**.
-5. **Bundle anwenden** starten.
-6. Im Manifest-Joblog das Ergebnis des automatischen HTTP-Tests gegen die VIP pruefen.
-
-Der Hostname kommt aus dem Ingress der jeweiligen Anwendung. Die Anfrage wird vom Worker mit diesem Host-Header direkt an die API-/Ingress-VIP des Clusters gesendet.
-
-**Aus Cluster entfernen** loescht nur die Kubernetes-Ressourcen. **Eintrag loeschen** entfernt danach den Builder-Eintrag der Anwendung.
+Sie werden erst entfernt, wenn Docker-Volumes ausdrücklich gelöscht werden.
 
 ## Update
 
-Fuer eine neue Version normalerweise:
+Für ein Update auf eine neue Version wird kein lokaler Docker-Build benötigt.
 
-```powershell
-git pull
-docker compose up -d --build
+In `.env` die gewünschte Version ändern:
+
+```env
+BUILDER_VERSION=1.1.0
 ```
 
-Die Datenbankmigrationen laufen beim Start des `web`-Containers automatisch. Bestehende Cluster-Workspaces und Datenbankdaten liegen in Docker-Volumes und bleiben erhalten.
+Danach:
 
-## Loeschen
+```bash
+docker compose pull
+docker compose up -d
+```
 
-Empfohlener Cluster-Destroy:
+Die Datenbankmigrationen laufen beim Start des `web`-Containers automatisch.
 
-1. Auf der Cluster-Seite den Clusternamen eintragen.
-2. **Destroy planen** starten.
-3. Danach **Destroy-Plan anwenden** starten.
-4. Wenn die Infrastruktur geloescht ist, **Cluster endgueltig entfernen** nutzen.
+Bestehende Daten in `postgres-data` und `cluster-data` bleiben erhalten.
 
-Falls VMs bereits manuell in Proxmox geloescht wurden, prueft der Builder beim Entfernen des Eintrags die konfigurierten VM-IDs gegen Proxmox. Existiert noch eine passende VM, wird das Loeschen blockiert.
+Vor größeren Versionssprüngen sollte trotzdem ein Backup der persistenten Daten angelegt werden.
+
+## Rollback
+
+Für ein einfaches Container-Rollback kann wieder eine ältere Image-Version gesetzt werden:
+
+```env
+BUILDER_VERSION=1.0.0
+```
+
+Danach:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Ein Image-Rollback garantiert jedoch nicht automatisch, dass bereits ausgeführte Datenbankmigrationen rückwärtskompatibel sind.
+
+## Lokale Entwicklung
+
+Für die lokale Entwicklung werden `compose.yaml` und `compose.dev.yaml` gemeinsam verwendet.
+
+Unter Linux:
+
+```bash
+docker compose \
+  -f compose.yaml \
+  -f compose.dev.yaml \
+  up -d --build
+```
+
+Unter PowerShell:
+
+```powershell
+docker compose -f compose.yaml -f compose.dev.yaml up -d --build
+```
+
+Im Development-Setup werden Web und Worker lokal aus dem Dockerfile gebaut und das Repository zusätzlich nach `/iac` eingebunden.
+
+Dadurch kann weiterhin direkt mit den lokalen Terraform-, Ansible- und Anwendungdateien gearbeitet werden.
+
+Lokale Tests können über das Test-Profil gestartet werden:
+
+```powershell
+docker compose -f compose.yaml -f compose.dev.yaml --profile test run --rm test
+```
+
+## GitHub Actions und GHCR
+
+Die CI/CD-Pipeline liegt unter:
+
+```text
+.github/workflows/containers.yml
+```
+
+Bei einem Pull Request gegen `main`:
+
+- wird das Test-Image gebaut
+- werden die Pytest-Tests ausgeführt
+- werden Web- und Worker-Images testweise gebaut
+- es erfolgt kein Push nach GHCR
+
+Bei einem Push auf `main` werden nach erfolgreichen Tests unter anderem folgende Tags veröffentlicht:
+
+```text
+ghcr.io/midniqhtvibes/k8s-universal-web:edge
+ghcr.io/midniqhtvibes/k8s-universal-worker:edge
+```
+
+Zusätzlich werden SHA-basierte Tags erzeugt.
+
+Ein Release wird über einen Git-Tag ausgelöst:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Dadurch werden unter anderem veröffentlicht:
+
+```text
+ghcr.io/midniqhtvibes/k8s-universal-web:1.0.0
+ghcr.io/midniqhtvibes/k8s-universal-web:latest
+
+ghcr.io/midniqhtvibes/k8s-universal-worker:1.0.0
+ghcr.io/midniqhtvibes/k8s-universal-worker:latest
+```
 
 ## Wartung
 
-Nuetzliche Befehle:
+Nützliche Befehle:
 
-```powershell
+```bash
 docker compose ps
 docker compose logs -f web worker
 docker compose restart web worker
-docker compose up -d --build
 ```
 
-Alte abgeschlossene Jobs koennen auf der Cluster-Seite ueber **Job-Historie aufraeumen** entfernt werden. Alte nicht referenzierte Manifest-Revisionen koennen in einer Anwendung ueber **Revisionen aufraeumen** entfernt werden.
+Neue Images laden und Container aktualisieren:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Container stoppen:
+
+```bash
+docker compose down
+```
+
+Die persistenten Volumes bleiben dabei erhalten.
+
+## Sicherheit
+
+Folgende Dateien und Daten dürfen nicht in Git eingecheckt oder in Container-Images eingebaut werden:
+
+```text
+.env
+Kubeconfigs
+Talos-Konfigurationen
+Terraform State
+Private Keys
+Cluster-Workspaces
+Datenbankdaten
+```
+
+Ins Repository gehört nur die Vorlage:
+
+```text
+.env.example
+```
+
+`MASTER_KEY`, `SESSION_SECRET`, `POSTGRES_PASSWORD` und `INITIAL_ADMIN_PASSWORD` müssen pro Installation individuell gesetzt werden.
 
 ## Hinweise
 
-- `latest`-Images in eigenen Manifesten koennen sich veraendern und Deployments weniger reproduzierbar machen.
-- Wenn externe Downloads rate-limitiert werden, den Job spaeter erneut starten.
-- Wenn DNS- oder APT-Fehler auftreten, zuerst Gateway, DNS und Internetzugriff der Ziel-VMs pruefen.
-- Mutierende `kubectl`-Befehle in der Web-Konsole brauchen eine explizite Admin-Bestaetigung.
+- Für produktive Installationen sollte `BUILDER_VERSION` auf eine feste Version gesetzt werden.
+- `edge` eignet sich für Tests des aktuellen `main`-Branches.
+- `latest` verweist auf das zuletzt veröffentlichte Release.
+- `MASTER_KEY` muss dauerhaft gesichert und unverändert aufbewahrt werden.
+- Bei privaten GHCR-Images ist vor `docker compose pull` eine Anmeldung bei `ghcr.io` erforderlich.
+- Wenn externe Downloads rate-limitiert werden, den Vorgang später erneut starten.
+- Bei DNS- oder APT-Fehlern zuerst Gateway, DNS und Internetzugriff der Ziel-VMs prüfen.
