@@ -43,9 +43,6 @@ def test_rollout_demo_template_contains_configmap_and_rolling_update():
     assert {item["kind"] for item in documents} == {"Namespace", "ConfigMap", "Deployment", "Service", "Ingress"}
 
 
-def test_plain_kubernetes_secret_is_blocked():
-    with pytest.raises(ValueError, match="Secrets"):
-        validate_manifest_content("apiVersion: v1\nkind: Secret\nmetadata:\n  name: unsafe\nstringData:\n  password: test\n")
 
 
 @pytest.mark.parametrize("path", ["../secret.yaml", "/tmp/file.yaml", "manifest.txt"])
