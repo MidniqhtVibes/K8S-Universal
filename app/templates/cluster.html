@@ -78,29 +78,71 @@
     </div>
   </section>
 
-  <section class="card lifecycle-card">
-    <div class="card-header">
-      <div>
-        <p class="eyebrow">Bereitstellung</p>
-        <h2>Lifecycle</h2>
+  <div class="cluster-sidebar-stack">
+    {% set registry_enabled = cluster.config.get('registry_enabled', false) %}
+    {% set registry_use_http = cluster.config.get('registry_use_http', false) %}
+    <section class="card registry-card" aria-labelledby="registry-detail-heading">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Runtime</p>
+          <h2 id="registry-detail-heading">Container Registry</h2>
+        </div>
+        {% if registry_enabled %}
+        <span class="badge ready">{{ ui.icon('status-dot') }} Aktiviert</span>
+        {% else %}
+        <span class="badge neutral">{{ ui.icon('status-dot') }} Nicht konfiguriert</span>
+        {% endif %}
       </div>
-    </div>
 
-    <div class="lifecycle-action-grid">
-      <form method="post" action="/clusters/{{ cluster.id }}/jobs/plan">
-        <button class="button full">{{ ui.icon('file') }}<span>Terraform planen</span></button>
-      </form>
-      <form method="post" action="/clusters/{{ cluster.id }}/jobs/apply">
-        <button class="button full" {% if cluster.planned_hash != cluster.config_hash %}disabled title="Zuerst aktuellen Plan erstellen"{% endif %}>{{ ui.icon('check') }}<span>Geprüften Plan anwenden</span></button>
-      </form>
-      <form method="post" action="/clusters/{{ cluster.id }}/jobs/ansible">
-        <button class="button secondary full" {% if not terraform_state_available %}disabled title="Erst nach Terraform-Apply verfügbar"{% endif %}>{{ ui.icon('refresh') }}<span>Ansible erneut ausführen</span></button>
-      </form>
-      <form method="post" action="/clusters/{{ cluster.id }}/jobs/verify">
-        <button class="button secondary full" {% if not kubeconfig_available %}disabled title="Erst nach erfolgreichem Apply verfügbar"{% endif %}>{{ ui.icon('shield-check') }}<span>Cluster prüfen</span></button>
-      </form>
-    </div>
-  </section>
+      <dl class="registry-details">
+        <div>
+          <dt>Status</dt>
+          <dd>{% if registry_enabled %}Aktiviert{% else %}Nicht konfiguriert{% endif %}</dd>
+        </div>
+        {% if registry_enabled %}
+        <div>
+          <dt>Endpoint</dt>
+          <dd><code>{{ cluster.config.get('registry_endpoint', '') }}</code></dd>
+        </div>
+        <div>
+          <dt>Protokoll</dt>
+          <dd><span class="badge {% if registry_use_http %}warning{% else %}ready{% endif %}">{% if registry_use_http %}HTTP{% else %}HTTPS{% endif %}</span></dd>
+        </div>
+        {% endif %}
+      </dl>
+
+      {% if registry_enabled and registry_use_http %}
+      <div class="registry-security-note">
+        {{ ui.icon('alert') }}
+        <p><strong>Unverschlüsseltes HTTP</strong><span>Nur für vertrauenswürdige interne Test- oder Lab-Netze empfohlen.</span></p>
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="card lifecycle-card">
+      <div class="card-header">
+        <div>
+          <p class="eyebrow">Bereitstellung</p>
+          <h2>Lifecycle</h2>
+        </div>
+      </div>
+
+      <div class="lifecycle-action-grid">
+        <form method="post" action="/clusters/{{ cluster.id }}/jobs/plan">
+          <button class="button full">{{ ui.icon('file') }}<span>Terraform planen</span></button>
+        </form>
+        <form method="post" action="/clusters/{{ cluster.id }}/jobs/apply">
+          <button class="button full" {% if cluster.planned_hash != cluster.config_hash %}disabled title="Zuerst aktuellen Plan erstellen"{% endif %}>{{ ui.icon('check') }}<span>Geprüften Plan anwenden</span></button>
+        </form>
+        <form method="post" action="/clusters/{{ cluster.id }}/jobs/ansible">
+          <button class="button secondary full" {% if not terraform_state_available %}disabled title="Erst nach Terraform-Apply verfügbar"{% endif %}>{{ ui.icon('refresh') }}<span>Ansible erneut ausführen</span></button>
+        </form>
+        <form method="post" action="/clusters/{{ cluster.id }}/jobs/verify">
+          <button class="button secondary full" {% if not kubeconfig_available %}disabled title="Erst nach erfolgreichem Apply verfügbar"{% endif %}>{{ ui.icon('shield-check') }}<span>Cluster prüfen</span></button>
+        </form>
+      </div>
+    </section>
+  </div>
 </div>
 
 <section class="card jobs-card">

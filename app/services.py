@@ -141,6 +141,9 @@ def build_cluster_from_form(form: dict[str, str], cluster_id: str | None = None)
             "pod_cidr": form["pod_cidr"],
             "service_cidr": form["service_cidr"],
         },
+        "registry_enabled": form.get("registry_enabled") == "on",
+        "registry_endpoint": form.get("registry_endpoint"),
+        "registry_use_http": form.get("registry_use_http") == "on",
         "nodes": nodes,
         "addons": {
             "cni": {"provider": "calico", "version": form["calico_version"].strip()},

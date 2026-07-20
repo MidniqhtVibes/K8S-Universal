@@ -40,3 +40,43 @@ def test_wizard_does_not_offer_unimplemented_ports_or_minors():
     assert 'name="api_port"' not in wizard
     assert '<option value="v1.36" selected>v1.36</option>' in wizard
     assert 'name="lb_count" min="2" max="10"' in wizard
+
+
+def test_registry_fields_are_optional_and_provisioner_independent():
+    project = Path(__file__).parents[1]
+    wizard = (project / "app/templates/wizard.html").read_text(encoding="utf-8")
+    javascript = (project / "app/static/wizard.js").read_text(encoding="utf-8")
+
+    assert 'name="registry_enabled"' in wizard
+    assert 'name="registry_endpoint"' in wizard
+    assert 'name="registry_use_http"' in wizard
+    assert "values.get('registry_enabled', '') == 'on'" in wizard
+    assert "values.get('registry_endpoint', '')" in wizard
+    assert "values.get('registry_use_http', '') == 'on'" in wizard
+    assert "registryEndpoint.disabled = !enabled" in javascript
+    assert "registryEndpoint.required = enabled" in javascript
+    assert "registryUseHttp.disabled = !enabled" in javascript
+
+
+def test_registry_client_validation_and_http_warning_are_explicit():
+    project = Path(__file__).parents[1]
+    wizard = (project / "app/templates/wizard.html").read_text(encoding="utf-8")
+    javascript = (project / "app/static/wizard.js").read_text(encoding="utf-8")
+
+    assert "Bitte eine Registry-Adresse im Format host:port angeben" in javascript
+    assert "value.includes('://')" in javascript
+    assert "port < 1 || port > 65535" in javascript
+    assert "part => Number(part) <= 255" in javascript
+    assert "Unsichere HTTP-Verbindung" in wizard
+    assert "nur für vertrauenswürdige interne Test- oder Lab-Netze" in wizard
+    assert "Für produktive Umgebungen" in wizard
+
+
+def test_cluster_detail_shows_registry_status_with_legacy_defaults():
+    cluster = (Path(__file__).parents[1] / "app/templates/cluster.html").read_text(encoding="utf-8")
+
+    assert "cluster.config.get('registry_enabled', false)" in cluster
+    assert "cluster.config.get('registry_use_http', false)" in cluster
+    assert "cluster.config.get('registry_endpoint', '')" in cluster
+    assert "Nicht konfiguriert" in cluster
+    assert "Unverschlüsseltes HTTP" in cluster

@@ -85,6 +85,36 @@ Danach mit Benutzer `admin` und `INITIAL_ADMIN_PASSWORD` anmelden. Das initiale 
 
 Nach einer Änderung der Clusterkonfiguration gelten vorhandene Kubeconfig und Laufzeitstatus nicht mehr als aktuell. Der Builder verlangt dann einen neuen Terraform-Plan und wendet exakt dieses geprüfte Planartefakt an. SSH-Port `22`, Kubernetes-API-Port `6443` und Kubernetes `v1.36` sind die derzeit vollständig unterstützten Werte.
 
+### Optionale Container-Registry
+
+Im Wizard kann unter **Container Registry** genau ein privater Registry-Endpunkt
+für den Cluster aktiviert werden. Der Endpoint wird ohne Protokoll und Pfad im
+Format `host:port` eingegeben, zum Beispiel:
+
+```text
+10.200.50.240:5000
+```
+
+Standardmäßig verwendet containerd HTTPS. Die separate HTTP-Option darf nur für
+eine vertrauenswürdige interne Lab- oder Testumgebung aktiviert werden; für
+produktive Registries ist HTTPS vorgesehen. Der Builder konfiguriert
+ausschließlich den angegebenen Endpoint auf Control Planes und Workern und
+schaltet die TLS-Prüfung nicht global ab. Während der Ansible-Provisionierung
+wird außerdem `http(s)://<endpoint>/v2/` von jedem Kubernetes-Node geprüft.
+
+Nach erfolgreicher Provisionierung kann ein Workload das Image direkt
+referenzieren:
+
+```yaml
+containers:
+  - name: azubiorga
+    image: 10.200.50.240:5000/azubiorga:1.0.0
+```
+
+Eine manuelle `hosts.toml`-Konfiguration per SSH auf einzelnen Nodes ist für neu
+erstellte Cluster damit nicht erforderlich. Ist die Option deaktiviert, bleibt
+der bisherige Provisionierungsablauf unverändert.
+
 Destroy ist zweistufig. Zuerst wird nach Eingabe des Clusternamens ein Destroy-Plan erzeugt. Erst dieser unveränderte Plan kann danach angewendet werden.
 
 Nach einem erfolgreichen Destroy erhält der Cluster den Status `destroyed`. Erst dann erscheint die zusätzliche Aktion **Cluster endgültig entfernen**. Sie löscht den Builder-Eintrag sowie dessen lokalen Terraform-State, Kubeconfig, generierte Dateien und Jobdaten. Credentials bleiben erhalten.

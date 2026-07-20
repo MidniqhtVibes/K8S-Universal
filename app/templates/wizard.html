@@ -244,6 +244,77 @@
         <span class="switch-copy"><strong>Traefik installieren</strong><small>Stellt einen Ingress-Controller für HTTP- und HTTPS-Dienste bereit.</small></span>
       </label>
     </div>
+
+    <div class="form-subsection registry-section" aria-labelledby="registry-heading">
+      <div class="form-subsection-heading">
+        <div>
+          <p class="eyebrow">Optional</p>
+          <h3 id="registry-heading">Container Registry</h3>
+          <p>Konfiguriert eine private Registry auf allen Kubernetes-Nodes, unabhängig vom gewählten Provisioner.</p>
+        </div>
+      </div>
+
+      <label class="switch-field wide registry-enable-field">
+        <input
+          type="checkbox"
+          name="registry_enabled"
+          id="registry-enabled"
+          aria-controls="registry-options"
+          aria-expanded="{% if values.get('registry_enabled', '') == 'on' %}true{% else %}false{% endif %}"
+          {% if values.get('registry_enabled', '') == 'on' %}checked{% endif %}
+        >
+        <span class="switch-control" aria-hidden="true"></span>
+        <span class="switch-copy">
+          <strong>Private Registry für den Cluster konfigurieren</strong>
+          <small>Die Einstellung gilt für Control Planes und Worker, nicht für Load Balancer.</small>
+        </span>
+      </label>
+
+      <div class="registry-options" id="registry-options" {% if values.get('registry_enabled', '') != 'on' %}hidden{% endif %}>
+        <label class="registry-endpoint-field">
+          Registry-Adresse
+          <input
+            name="registry_endpoint"
+            id="registry-endpoint"
+            value="{{ values.get('registry_endpoint', '') }}"
+            placeholder="10.200.50.240:5000"
+            pattern="[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}"
+            maxlength="259"
+            autocapitalize="none"
+            autocomplete="off"
+            spellcheck="false"
+            aria-describedby="registry-endpoint-hint registry-endpoint-error"
+            {% if values.get('registry_enabled', '') == 'on' %}required{% else %}disabled{% endif %}
+          >
+          <span class="field-hint" id="registry-endpoint-hint">Nur <code>host:port</code>, ohne <code>http://</code>, <code>https://</code> oder Pfad.</span>
+          <span class="field-error hidden" id="registry-endpoint-error" role="alert"></span>
+        </label>
+
+        <label class="switch-field registry-http-field">
+          <input
+            type="checkbox"
+            name="registry_use_http"
+            id="registry-use-http"
+            aria-controls="registry-http-warning"
+            {% if values.get('registry_use_http', '') == 'on' %}checked{% endif %}
+            {% if values.get('registry_enabled', '') != 'on' %}disabled{% endif %}
+          >
+          <span class="switch-control" aria-hidden="true"></span>
+          <span class="switch-copy">
+            <strong>Registry verwendet unverschlüsseltes HTTP</strong>
+            <small>Standardmäßig wird die Registry sicher über HTTPS angesprochen.</small>
+          </span>
+        </label>
+
+        <div class="alert alert-warning registry-http-warning" id="registry-http-warning" role="status" {% if values.get('registry_enabled', '') != 'on' or values.get('registry_use_http', '') != 'on' %}hidden{% endif %}>
+          <span class="alert-icon">{{ ui.icon('alert') }}</span>
+          <div>
+            <strong>Unsichere HTTP-Verbindung</strong>
+            <p>HTTP sollte nur für vertrauenswürdige interne Test- oder Lab-Netze verwendet werden. Für produktive Umgebungen sollte die Registry über HTTPS bereitgestellt werden.</p>
+          </div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <div class="sticky-actions">

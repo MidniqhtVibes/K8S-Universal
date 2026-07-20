@@ -420,8 +420,16 @@ def run_ansible_stack(
     env: dict[str, str],
     secrets: list[str],
 ) -> None:
+    if config.registry_enabled:
+        append_log(job.id, f"[Registry] Private Registry aktiviert: {config.registry_endpoint}\n")
+        append_log(job.id, f"[Registry] Protokoll: {'HTTP' if config.registry_use_http else 'HTTPS'}\n")
+        append_log(job.id, "[Registry] Konfiguriere containerd auf Control Plane Nodes.\n")
+        append_log(job.id, "[Registry] Konfiguriere containerd auf Worker Nodes.\n")
+        append_log(job.id, "[Registry] Prüfe Erreichbarkeit auf allen Kubernetes-Nodes.\n")
     wait_for_ssh(job, config)
     run_command(job, ["ansible-playbook", "-i", "inventory.generated.yml", "site.yml"], ansible_dir, env, secrets)
+    if config.registry_enabled:
+        append_log(job.id, "[Registry] Registry erreichbar.\n")
     if config.addons.ingress.enabled:
         run_command(job, ["helm", "repo", "add", "traefik", "https://traefik.github.io/charts", "--force-update"], workspace, env, secrets)
         run_command(job, ["helm", "repo", "update"], workspace, env, secrets)

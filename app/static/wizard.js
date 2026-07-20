@@ -86,3 +86,83 @@ document.querySelector('#suggest-allocations')?.addEventListener('click', async 
     if (input) input.value = data[field];
   }
 });
+
+const registryEnabled = document.querySelector('#registry-enabled');
+const registryOptions = document.querySelector('#registry-options');
+const registryEndpoint = document.querySelector('#registry-endpoint');
+const registryEndpointError = document.querySelector('#registry-endpoint-error');
+const registryUseHttp = document.querySelector('#registry-use-http');
+const registryHttpWarning = document.querySelector('#registry-http-warning');
+const registryValidationMessage = 'Bitte eine Registry-Adresse im Format host:port angeben, zum Beispiel 10.200.50.240:5000.';
+let registryEndpointTouched = false;
+
+const isValidRegistryEndpoint = rawValue => {
+  const value = rawValue.trim();
+  if (!value || value.includes('://') || value.includes('/') || /\s/.test(value)) return false;
+
+  const separator = value.lastIndexOf(':');
+  if (separator <= 0 || value.indexOf(':') !== separator) return false;
+  const host = value.slice(0, separator);
+  const portText = value.slice(separator + 1);
+  if (!/^\d{1,5}$/.test(portText)) return false;
+  const port = Number(portText);
+  if (port < 1 || port > 65535) return false;
+
+  if (/^\d+(?:\.\d+){3}$/.test(host)) {
+    return host.split('.').every(part => Number(part) <= 255);
+  }
+  if (host.length > 253) return false;
+  return host.split('.').every(label =>
+    label.length > 0 && label.length <= 63 && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)
+  );
+};
+
+const validateRegistryEndpoint = () => {
+  if (!registryEndpoint) return true;
+  const valid = !registryEnabled?.checked || isValidRegistryEndpoint(registryEndpoint.value);
+  registryEndpoint.setCustomValidity(valid ? '' : registryValidationMessage);
+  if (valid) {
+    registryEndpoint.removeAttribute('aria-invalid');
+  } else {
+    registryEndpoint.setAttribute('aria-invalid', 'true');
+  }
+  if (registryEndpointError) {
+    registryEndpointError.textContent = valid ? '' : registryValidationMessage;
+    registryEndpointError.classList.toggle('hidden', valid || !registryEndpointTouched);
+  }
+  return valid;
+};
+
+const updateRegistryFields = () => {
+  if (!registryEnabled || !registryOptions || !registryEndpoint || !registryUseHttp) return;
+  const enabled = registryEnabled.checked;
+  registryOptions.hidden = !enabled;
+  registryOptions.setAttribute('aria-hidden', String(!enabled));
+  registryEnabled.setAttribute('aria-expanded', String(enabled));
+  registryEndpoint.disabled = !enabled;
+  registryEndpoint.required = enabled;
+  registryUseHttp.disabled = !enabled;
+  if (!enabled) registryEndpointTouched = false;
+  validateRegistryEndpoint();
+  if (registryHttpWarning) registryHttpWarning.hidden = !enabled || !registryUseHttp.checked;
+};
+
+registryEnabled?.addEventListener('change', updateRegistryFields);
+registryUseHttp?.addEventListener('change', updateRegistryFields);
+registryEndpoint?.addEventListener('input', validateRegistryEndpoint);
+registryEndpoint?.addEventListener('blur', () => {
+  registryEndpoint.value = registryEndpoint.value.trim();
+  registryEndpointTouched = true;
+  validateRegistryEndpoint();
+});
+registryEndpoint?.addEventListener('invalid', () => {
+  registryEndpointTouched = true;
+  validateRegistryEndpoint();
+});
+document.querySelector('#wizard')?.addEventListener('submit', () => {
+  if (!registryEnabled?.checked || !registryEndpoint) return;
+  registryEndpoint.value = registryEndpoint.value.trim();
+  registryEndpointTouched = true;
+  validateRegistryEndpoint();
+});
+updateRegistryFields();
