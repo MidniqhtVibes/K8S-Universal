@@ -1,5 +1,6 @@
 import re
 from hashlib import sha256
+from html.parser import HTMLParser
 from math import pow
 from pathlib import Path
 
@@ -11,6 +12,36 @@ from app.main import APP_CSS_VERSION, THEMES_JS_VERSION, app
 PROJECT_ROOT = Path(__file__).parents[1]
 THEME_IDS = ("standard", "github-dark", "hello-kitty", "light")
 THEME_STORAGE_KEY = "k8s-universal-theme"
+
+
+class _ThemeBootstrapParser(HTMLParser):
+    """Collect inline scripts that occur before the application stylesheet."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.app_stylesheet_seen = False
+        self.scripts_before_stylesheet: list[str] = []
+        self._script_chunks: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        href = attributes.get("href") or ""
+        if tag == "link" and href.startswith("/static/app.css"):
+            self.app_stylesheet_seen = True
+        elif not self.app_stylesheet_seen and tag == "script" and "src" not in attributes:
+            self._script_chunks = []
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data: str) -> None:
+        if self._script_chunks is not None:
+            self._script_chunks.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._script_chunks is not None:
+            self.scripts_before_stylesheet.append("".join(self._script_chunks))
+            self._script_chunks = None
 
 
 def _login(client: TestClient) -> None:
@@ -49,6 +80,8 @@ def test_themes_page_requires_login_and_renders_all_theme_choices():
     assert response.status_code == 200
     assert re.search(r"<h1[^>]*>\s*Themes\s*</h1>", response.text)
     assert re.search(r'class="[^"]*\btheme-current-name\b', response.text)
+    assert "Sofortige Vorschau" not in response.text
+    assert "theme-notice" not in response.text
     for theme_id in THEME_IDS:
         assert re.search(
             rf'class="[^"]*\btheme-card\b[^"]*"[^>]*data-theme-option="{re.escape(theme_id)}"',
@@ -77,12 +110,14 @@ def test_themes_navigation_link_is_directly_above_credentials():
 
 def test_theme_bootstrap_runs_before_app_stylesheet_to_avoid_a_flash():
     base = (PROJECT_ROOT / "app/templates/base.html").read_text(encoding="utf-8")
-    stylesheet = re.search(r'<link\b[^>]*href="/static/app\.css(?:\?[^\"]*)?"[^>]*>', base)
-    assert stylesheet is not None
+    parser = _ThemeBootstrapParser()
+    parser.feed(base)
 
-    before_stylesheet = base[: stylesheet.start()]
-    bootstrap_scripts = re.findall(r"<script\b[^>]*>(.*?)</script>", before_stylesheet, re.DOTALL)
-    bootstrap = next((script for script in bootstrap_scripts if THEME_STORAGE_KEY in script), None)
+    assert parser.app_stylesheet_seen
+    bootstrap = next(
+        (script for script in parser.scripts_before_stylesheet if THEME_STORAGE_KEY in script),
+        None,
+    )
     assert bootstrap is not None, "Theme-Bootstrap muss vor app.css stehen"
 
     assert "localStorage.getItem" in bootstrap
@@ -101,6 +136,17 @@ def test_theme_bootstrap_runs_before_app_stylesheet_to_avoid_a_flash():
     assert re.search(r'<html\b[^>]*\bdata-theme="standard"', base)
     assert re.search(r'<meta\b[^>]*name="color-scheme"[^>]*content="dark light"', base)
     assert re.search(r'<meta\b[^>]*name="theme-color"[^>]*content="#[0-9a-fA-F]{6}"', base)
+
+
+def test_theme_bootstrap_parser_handles_uppercase_html_tags():
+    parser = _ThemeBootstrapParser()
+    parser.feed(
+        f"<SCRIPT>const key = '{THEME_STORAGE_KEY}';</SCRIPT>"
+        '<LINK rel="stylesheet" href="/static/app.css?v=test">'
+    )
+
+    assert parser.app_stylesheet_seen
+    assert parser.scripts_before_stylesheet == [f"const key = '{THEME_STORAGE_KEY}';"]
 
 
 def test_theme_assets_use_content_hashes_to_avoid_stale_palettes():
